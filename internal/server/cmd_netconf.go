@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -225,6 +226,56 @@ func (s *session) cmdUnlock(args []string) {
 	} else {
 		s.writef("%s\n", reply)
 	}
+}
+
+func (s *session) cmdDump(args []string) {
+	if !s.requireConnection() {
+		return
+	}
+
+	if len(args) == 0 {
+		s.writef("Usage: dump text [filename]\n")
+		s.writef("       dump xml  [filename]\n")
+		return
+	}
+
+	format := strings.ToLower(args[0])
+	if format != "text" && format != "xml" {
+		s.writef("%sFormat must be 'text' or 'xml'%s\n", colorRed, colorReset)
+		return
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	reply, err := s.nc.GetConfig(ctx, "running", "")
+	elapsed := time.Since(start)
+	if err != nil {
+		s.writef("%sError: %s%s\n", colorRed, err, colorReset)
+		return
+	}
+
+	var content string
+	switch format {
+	case "text":
+		content = formatXMLResponsePlain(reply, nil)
+	case "xml":
+		content = extractDataXML(reply)
+	}
+
+	if len(args) > 1 {
+		filename := args[1]
+		if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
+			s.writef("%sError writing file: %s%s\n", colorRed, err, colorReset)
+			return
+		}
+		s.writef("%sSaved to %s (%d bytes)%s\n", colorGreen, filename, len(content), colorReset)
+	} else {
+		s.writef("%s", content)
+	}
+	s.writef("%s(%s)%s\n", colorDim, elapsed.Round(time.Millisecond), colorReset)
+	s.saveHistory("dump "+format, elapsed)
 }
 
 func (s *session) cmdRPC() {

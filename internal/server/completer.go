@@ -115,7 +115,7 @@ var commandsBase = []string{
 
 var commandsConnected = []string{
 	"commit", "connect", "discard", "disconnect",
-	"exit", "help", "lock", "rpc",
+	"dump", "exit", "help", "lock", "rpc",
 	"set", "show", "unlock", "validate",
 }
 
@@ -211,6 +211,11 @@ func (s *session) completeArgs(cmd string, args []string, word string) []string 
 
 	case "set":
 		return s.pathCompletions(args, word)
+
+	case "dump":
+		if len(args) == 1 {
+			return filterByPrefix([]string{"text", "xml"}, word)
+		}
 
 	case "lock", "unlock":
 		return filterByPrefix([]string{"candidate", "running"}, word)

@@ -162,6 +162,74 @@ func formatXMLResponse(xmlData string, path []string) string {
 	return formatTree(tree, 0)
 }
 
+// formatTreePlain renders without ANSI colors (for file dump).
+func formatTreePlain(nodes []*xmlNode, depth int) string {
+	var buf strings.Builder
+	writeNodesPlain(&buf, nodes, depth)
+	return buf.String()
+}
+
+func writeNodesPlain(buf *strings.Builder, nodes []*xmlNode, depth int) {
+	counts := make(map[string]int)
+	for _, n := range nodes {
+		counts[n.name]++
+	}
+
+	for _, n := range nodes {
+		indent := strings.Repeat("  ", depth)
+		isList := counts[n.name] > 1
+
+		if len(n.children) == 0 {
+			buf.WriteString(fmt.Sprintf("%s%-24s %s\n", indent, n.name, n.value))
+			continue
+		}
+
+		if isList && len(n.children) > 0 {
+			first := n.children[0]
+			if len(first.children) == 0 && first.value != "" {
+				buf.WriteString(fmt.Sprintf("%s%s %s\n", indent, n.name, first.value))
+				if len(n.children) > 1 {
+					writeNodesPlain(buf, n.children[1:], depth+1)
+				}
+				continue
+			}
+		}
+
+		buf.WriteString(fmt.Sprintf("%s%s\n", indent, n.name))
+		writeNodesPlain(buf, n.children, depth+1)
+	}
+}
+
+// formatXMLResponsePlain formats without colors for file export.
+func formatXMLResponsePlain(xmlData string, path []string) string {
+	tree := parseXMLTree(xmlData)
+	if len(tree) == 0 {
+		return ""
+	}
+	if len(path) > 0 {
+		node := findNode(tree, path)
+		if node == nil {
+			return ""
+		}
+		if len(node.children) > 0 {
+			return formatTreePlain([]*xmlNode{node}, 0)
+		}
+		return fmt.Sprintf("%-24s %s\n", node.name, node.value)
+	}
+	return formatTreePlain(tree, 0)
+}
+
+// extractDataXML returns clean XML content from rpc-reply (strips wrapper).
+func extractDataXML(xmlData string) string {
+	start := strings.Index(xmlData, "<data>")
+	end := strings.LastIndex(xmlData, "</data>")
+	if start >= 0 && end > start {
+		content := strings.TrimSpace(xmlData[start+6 : end])
+		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n" + content + "\n</config>\n"
+	}
+	return xmlData
+}
+
 // isRPCOK checks if the rpc-reply contains <ok/>
 func isRPCOK(xmlData string) bool {
 	return strings.Contains(xmlData, "<ok/>")

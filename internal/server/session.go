@@ -108,6 +108,8 @@ func (s *session) run() {
 			s.cmdLock(args)
 		case "unlock":
 			s.cmdUnlock(args)
+		case "dump":
+			s.cmdDump(args)
 		case "rpc":
 			s.cmdRPC()
 		case "help":

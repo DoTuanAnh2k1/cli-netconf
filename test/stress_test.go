@@ -150,6 +150,46 @@ func TestStressSet1000Configs(t *testing.T) {
 	fmt.Fprintf(stdin, "exit\r")
 }
 
+func TestDumpText(t *testing.T) {
+	client, session, stdin, reader := connectAndSelectNE(t)
+	defer client.Close()
+	defer session.Close()
+
+	fmt.Fprintf(stdin, "dump text /tmp/test-dump.txt\r")
+	time.Sleep(2 * time.Second)
+	output := reader.collect(5 * time.Second)
+	plain := stripANSI(output)
+
+	if !strings.Contains(plain, "Saved to") {
+		t.Fatalf("dump text failed: %s", plain)
+	}
+	t.Logf("dump text: %s", strings.TrimSpace(plain))
+
+	fmt.Fprintf(stdin, "disconnect\r")
+	time.Sleep(300 * time.Millisecond)
+	fmt.Fprintf(stdin, "exit\r")
+}
+
+func TestDumpXML(t *testing.T) {
+	client, session, stdin, reader := connectAndSelectNE(t)
+	defer client.Close()
+	defer session.Close()
+
+	fmt.Fprintf(stdin, "dump xml /tmp/test-dump.xml\r")
+	time.Sleep(2 * time.Second)
+	output := reader.collect(5 * time.Second)
+	plain := stripANSI(output)
+
+	if !strings.Contains(plain, "Saved to") {
+		t.Fatalf("dump xml failed: %s", plain)
+	}
+	t.Logf("dump xml: %s", strings.TrimSpace(plain))
+
+	fmt.Fprintf(stdin, "disconnect\r")
+	time.Sleep(300 * time.Millisecond)
+	fmt.Fprintf(stdin, "exit\r")
+}
+
 func TestMultiSession(t *testing.T) {
 	const sessionCount = 5
 	var wg sync.WaitGroup

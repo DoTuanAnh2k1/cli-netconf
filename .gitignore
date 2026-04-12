@@ -3,6 +3,6 @@ host_key
 host_key.pub
 *.exe
 .claude/*
-/cli-netconf
-/mock-mgt
-/mock-netconf
+cli-netconf
+mock-mgt
+mock-netconf

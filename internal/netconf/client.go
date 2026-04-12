@@ -123,20 +123,31 @@ func (c *Client) readMessage(ctx context.Context) (string, error) {
 	ch := make(chan readResult, 1)
 	go func() {
 		var buf bytes.Buffer
-		tmp := make([]byte, 8192)
+		tmp := make([]byte, 65536) // 64KB read buffer
+		delimBytes := []byte(delimiter)
+		delimLen := len(delimBytes)
+
 		for {
 			n, err := c.stdout.Read(tmp)
 			if n > 0 {
+				prevLen := buf.Len()
 				buf.Write(tmp[:n])
-				if idx := strings.Index(buf.String(), delimiter); idx >= 0 {
-					msg := strings.TrimSpace(buf.String()[:idx])
-					ch <- readResult{msg, nil}
+
+				// Only search the newly written region (+ delimiter overlap)
+				searchStart := prevLen - delimLen + 1
+				if searchStart < 0 {
+					searchStart = 0
+				}
+				region := buf.Bytes()[searchStart:]
+				if idx := bytes.Index(region, delimBytes); idx >= 0 {
+					msg := bytes.TrimSpace(buf.Bytes()[:searchStart+idx])
+					ch <- readResult{string(msg), nil}
 					return
 				}
 			}
 			if err != nil {
 				if buf.Len() > 0 {
-					ch <- readResult{strings.TrimSpace(buf.String()), nil}
+					ch <- readResult{string(bytes.TrimSpace(buf.Bytes())), nil}
 				} else {
 					ch <- readResult{"", fmt.Errorf("read: %w", err)}
 				}

@@ -226,6 +226,8 @@ func (s *session) cmdHelp() {
   discard                            Discard candidate changes
   lock [datastore]                   Lock datastore (default: candidate)
   unlock [datastore]                 Unlock datastore (default: candidate)
+  dump text [filename]               Dump running config as text
+  dump xml  [filename]               Dump running config as XML
   rpc                                Send raw NETCONF RPC XML
 
 %sExamples:%s
