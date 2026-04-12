@@ -1,0 +1,959 @@
+openapi: 3.0.3
+info:
+  title: mgt-service
+  version: "2.0"
+  description: |
+    REST API for user management, authorization, and Network Element (NE) management.
+
+    **Authentication:** Most endpoints require an `Authorization: Bearer <jwt_token>` header.
+    Token obtained from `POST /aa/authenticate`.
+
+servers:
+  - url: http://localhost:3000
+    description: Local
+
+security: []
+
+tags:
+  - name: System
+    description: Health check, Swagger UI
+  - name: Authentication
+    description: Authentication & account management
+  - name: Permission
+    description: Role / permission management
+  - name: Network Element
+    description: NE authorization & listing
+  - name: User Authorization
+    description: User role assignment
+  - name: History
+    description: Command history
+  - name: Subscribers
+    description: View data files from TCP subscriber server
+
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── System ──────────────────────────────────────────────────────────────────
+  /health:
+    get:
+      tags: [System]
+      summary: Health check (HTTP + DB ping)
+      operationId: healthCheck
+      security: []
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /docs:
+    get:
+      tags: [System]
+      summary: Swagger UI
+      operationId: swaggerUI
+      security: []
+      responses:
+        "200":
+          description: HTML page
+
+  /docs/openapi.yaml:
+    get:
+      tags: [System]
+      summary: OpenAPI spec (YAML)
+      operationId: openAPISpec
+      security: []
+      responses:
+        "200":
+          description: YAML file
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  # ── Authentication ───────────────────────────────────────────────────────────
+  /aa/authenticate:
+    post:
+      tags: [Authentication]
+      summary: Login, get JWT
+      operationId: authenticate
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            example:
+              username: admin
+              password: secret
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/validate-token:
+    post:
+      tags: [Authentication]
+      summary: Validate token
+      operationId: validateToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateTokenRequest"
+      responses:
+        "200":
+          description: Token valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidateTokenResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /aa/change-password:
+    post:
+      tags: [Authentication]
+      summary: Change password
+      operationId: changePassword
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "200":
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Wrong old password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authenticate/user/set:
+    post:
+      tags: [Authentication]
+      summary: Create or re-enable user
+      operationId: userSet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserSetRequest"
+      responses:
+        "201":
+          description: Created / re-enabled
+        "304":
+          description: User already active
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authenticate/user/delete:
+    post:
+      tags: [Authentication]
+      summary: Disable user (soft delete)
+      operationId: userDelete
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UsernameRequest"
+      responses:
+        "200":
+          description: Disabled successfully
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authenticate/user/show:
+    get:
+      tags: [Authentication]
+      summary: List users with NEs and roles
+      operationId: userShow
+      security:
+        - bearerAuth: []
+      responses:
+        "302":
+          description: User list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserShowItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Permission ───────────────────────────────────────────────────────────────
+  /aa/authorize/permission/set:
+    post:
+      tags: [Permission]
+      summary: Create new role
+      operationId: permissionSet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CliRole"
+      responses:
+        "201":
+          description: Created
+        "304":
+          description: Role already exists
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authorize/permission/delete:
+    post:
+      tags: [Permission]
+      summary: Delete role
+      operationId: permissionDelete
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CliRole"
+      responses:
+        "200":
+          description: Deleted
+        "304":
+          description: Role not found
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authorize/permission/show:
+    get:
+      tags: [Permission]
+      summary: List all roles
+      operationId: permissionShow
+      security:
+        - bearerAuth: []
+      responses:
+        "302":
+          description: Role list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CliRole"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── User Authorization ───────────────────────────────────────────────────────
+  /aa/authorize/user/set:
+    post:
+      tags: [User Authorization]
+      summary: Assign permission to user
+      operationId: authorizeUserSet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserPermissionRequest"
+      responses:
+        "200":
+          description: Assigned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "304":
+          description: Permission already assigned
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authorize/user/delete:
+    post:
+      tags: [User Authorization]
+      summary: Remove user permission
+      operationId: authorizeUserDelete
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserPermissionRequest"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "304":
+          description: Permission not found
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authorize/user/show:
+    get:
+      tags: [User Authorization]
+      summary: List all user permissions
+      operationId: authorizeUserShow
+      security:
+        - bearerAuth: []
+      responses:
+        "302":
+          description: List
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserPermissionItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Network Element ──────────────────────────────────────────────────────────
+  /aa/authorize/ne/show:
+    get:
+      tags: [Network Element]
+      summary: List system NEs (5GC)
+      operationId: neShow
+      security:
+        - bearerAuth: []
+      responses:
+        "302":
+          description: NE list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NeShowItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authorize/ne/set:
+    post:
+      tags: [Network Element]
+      summary: Assign NE to user
+      operationId: neSet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserNeRequest"
+      responses:
+        "200":
+          description: Assigned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "304":
+          description: NE already assigned
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/authorize/ne/delete:
+    post:
+      tags: [Network Element]
+      summary: Remove NE from user
+      operationId: neDelete
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserNeRequest"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "304":
+          description: User-NE relationship not found
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/list/ne:
+    get:
+      tags: [Network Element]
+      summary: NEs accessible to logged-in user
+      operationId: listNe
+      security:
+        - bearerAuth: []
+      responses:
+        "302":
+          description: NE list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NeListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/list/ne/monitor:
+    get:
+      tags: [Network Element]
+      summary: NE monitor URLs for logged-in user
+      operationId: listNeMonitor
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: NE monitor list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NeMonitorItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── History ──────────────────────────────────────────────────────────────────
+  /aa/history/save:
+    post:
+      tags: [History]
+      summary: Save a command history record
+      operationId: historySave
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HistorySaveRequest"
+      responses:
+        "201":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CliOperationHistory"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Subscribers ──────────────────────────────────────────────────────────────
+  /aa/subscribers/files:
+    get:
+      tags: [Subscribers]
+      summary: List saved subscriber files
+      description: |
+        Lists all `list_subscribers_results.<index>` files in `TCP_DATA_DIR`, sorted by ascending index.
+      operationId: subscriberFileList
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: File list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubscriberFileInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /aa/subscribers/files/{index}:
+    get:
+      tags: [Subscribers]
+      summary: View subscriber file by index
+      operationId: subscriberFileView
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: index
+          in: path
+          required: true
+          description: File index (integer >= 0)
+          schema:
+            type: integer
+            minimum: 0
+          example: 0
+      responses:
+        "200":
+          description: File content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriberFileContent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # ── Reusable responses ───────────────────────────────────────────────────────
+  responses:
+    BadRequest:
+      description: Invalid request body / params
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageResponse"
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageResponse"
+    InternalError:
+      description: Server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MessageResponse"
+
+  # ── Schemas ──────────────────────────────────────────────────────────────────
+  schemas:
+
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+    TokenResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        response_data:
+          type: string
+          description: JWT token
+        response_code:
+          type: string
+          example: "200"
+        system_type:
+          type: string
+          example: 5GC
+
+    ValidateTokenRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: "Format: Basic <jwt>"
+
+    ValidateTokenResponse:
+      type: object
+      properties:
+        username:
+          type: string
+        roles:
+          type: string
+          description: Space-separated role list
+
+    ChangePasswordRequest:
+      type: object
+      required: [username, old_password, new_password]
+      properties:
+        username:
+          type: string
+        old_password:
+          type: string
+        new_password:
+          type: string
+
+    UsernameRequest:
+      type: object
+      required: [account_name]
+      properties:
+        account_name:
+          type: string
+
+    UserSetRequest:
+      type: object
+      required: [account_name, password]
+      properties:
+        account_name:
+          type: string
+        password:
+          type: string
+        full_name:
+          type: string
+        email:
+          type: string
+        phone_number:
+          type: string
+        description:
+          type: string
+
+    UserShowItem:
+      type: object
+      properties:
+        username:
+          type: string
+        tblNes:
+          type: array
+          items:
+            $ref: "#/components/schemas/NeRef"
+        role:
+          type: string
+
+    NeRef:
+      type: object
+      properties:
+        ne:
+          type: string
+        site:
+          type: string
+
+    # ── Permission ────────────────────────────────────────────────────────────
+    CliRole:
+      type: object
+      properties:
+        role_id:
+          type: integer
+          format: int64
+          readOnly: true
+        include_type:
+          type: string
+        ne_type:
+          type: string
+        scope:
+          type: string
+        permission:
+          type: string
+        path:
+          type: string
+
+    UserPermissionRequest:
+      type: object
+      required: [username, permission]
+      properties:
+        username:
+          type: string
+        permission:
+          type: string
+
+    UserPermissionItem:
+      type: object
+      properties:
+        username:
+          type: string
+        permissions:
+          type: string
+          description: Space-separated permission list
+
+    # ── Network Element ───────────────────────────────────────────────────────
+    UserNeRequest:
+      type: object
+      required: [username, neid]
+      properties:
+        username:
+          type: string
+        neid:
+          type: string
+          description: NE ID (string number)
+
+    NeShowItem:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        site_name:
+          type: string
+        ip_address:
+          type: string
+        port:
+          type: integer
+          format: int32
+        description:
+          type: string
+
+    NeListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+        neDataList:
+          type: array
+          items:
+            $ref: "#/components/schemas/NeDataItem"
+
+    NeDataItem:
+      type: object
+      properties:
+        site:
+          type: string
+        ne:
+          type: string
+        ip:
+          type: string
+        description:
+          type: string
+        namespace:
+          type: string
+        port:
+          type: integer
+          format: int32
+        urlList:
+          type: array
+          nullable: true
+          items:
+            type: object
+            properties:
+              ipAddress:
+                type: string
+              port:
+                type: integer
+
+    NeMonitorItem:
+      type: object
+      properties:
+        site:
+          type: string
+        ne:
+          type: string
+        ip:
+          type: string
+        description:
+          type: string
+        namespace:
+          type: string
+        port:
+          type: integer
+          format: int32
+        ne_monitor_url:
+          type: string
+
+    # ── History ───────────────────────────────────────────────────────────────
+    HistorySaveRequest:
+      type: object
+      required: [cmd_name, ne_name]
+      properties:
+        cmd_name:
+          type: string
+        ne_name:
+          type: string
+        ne_ip:
+          type: string
+        ne_id:
+          type: integer
+          format: int32
+        scope:
+          type: string
+        result:
+          type: string
+        input_type:
+          type: string
+        session:
+          type: string
+        batch_id:
+          type: string
+        time_to_complete:
+          type: integer
+          format: int64
+          description: Milliseconds
+
+    CliOperationHistory:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int32
+        account:
+          type: string
+        cmd_name:
+          type: string
+        ne_name:
+          type: string
+        ne_ip:
+          type: string
+        ne_id:
+          type: integer
+          format: int32
+        scope:
+          type: string
+        result:
+          type: string
+        input_type:
+          type: string
+        session:
+          type: string
+        batch_id:
+          type: string
+        time_to_complete:
+          type: integer
+          format: int64
+        created_date:
+          type: string
+          format: date-time
+        executed_time:
+          type: string
+          format: date-time
+
+    # ── Subscribers ───────────────────────────────────────────────────────────
+    SubscriberFileInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          example: list_subscribers_results.0
+        index:
+          type: integer
+          example: 0
+        size_bytes:
+          type: integer
+          format: int64
+          example: 1024
+
+    SubscriberFileContent:
+      type: object
+      properties:
+        name:
+          type: string
+          example: list_subscribers_results.0
+        index:
+          type: integer
+          example: 0
+        lines:
+          type: array
+          items:
+            type: string
+        total:
+          type: integer
+          description: Total line count
+          example: 42

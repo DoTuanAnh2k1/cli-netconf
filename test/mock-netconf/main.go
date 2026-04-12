@@ -1,0 +1,535 @@
+package main
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/xml"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"golang.org/x/crypto/ssh"
+)
+
+// ---------------------------------------------------------------------------
+// Data store — running + candidate config as raw XML strings
+// ---------------------------------------------------------------------------
+
+type dataStore struct {
+	mu        sync.RWMutex
+	running   string
+	candidate string
+	locked    map[string]bool // datastore name -> locked
+}
+
+func newDataStore() *dataStore {
+	cfg := defaultRunningConfig()
+	return &dataStore{
+		running:   cfg,
+		candidate: cfg,
+		locked:    make(map[string]bool),
+	}
+}
+
+func defaultRunningConfig() string {
+	return `<system xmlns="urn:vht:params:xml:ns:yang:vht-system">
+    <hostname>ne-amf-01</hostname>
+    <location>HCM Data Center, Rack A3</location>
+    <contact>noc@vht.com.vn</contact>
+    <ntp>
+      <enabled>true</enabled>
+      <server>
+        <address>10.0.0.1</address>
+        <prefer>true</prefer>
+      </server>
+      <server>
+        <address>10.0.0.2</address>
+        <prefer>false</prefer>
+      </server>
+    </ntp>
+    <dns>
+      <search>vht.internal</search>
+      <search>vht.com.vn</search>
+      <server>
+        <address>8.8.8.8</address>
+      </server>
+      <server>
+        <address>8.8.4.4</address>
+      </server>
+    </dns>
+    <logging>
+      <level>info</level>
+      <remote-server>
+        <address>10.0.10.50</address>
+        <port>514</port>
+        <protocol>udp</protocol>
+      </remote-server>
+    </logging>
+  </system>
+  <interfaces xmlns="urn:vht:params:xml:ns:yang:vht-system">
+    <interface>
+      <name>eth0</name>
+      <description>Management Interface</description>
+      <enabled>true</enabled>
+      <mtu>1500</mtu>
+      <ipv4>
+        <address>10.0.1.10</address>
+        <prefix-length>24</prefix-length>
+        <gateway>10.0.1.1</gateway>
+      </ipv4>
+    </interface>
+    <interface>
+      <name>eth1</name>
+      <description>N2 Interface (AMF-RAN)</description>
+      <enabled>true</enabled>
+      <mtu>9000</mtu>
+      <ipv4>
+        <address>172.16.0.10</address>
+        <prefix-length>24</prefix-length>
+      </ipv4>
+    </interface>
+    <interface>
+      <name>eth2</name>
+      <description>N11 Interface (AMF-SMF)</description>
+      <enabled>true</enabled>
+      <mtu>1500</mtu>
+      <ipv4>
+        <address>172.16.1.10</address>
+        <prefix-length>24</prefix-length>
+      </ipv4>
+    </interface>
+  </interfaces>`
+}
+
+// ---------------------------------------------------------------------------
+// NETCONF XML RPC structures
+// ---------------------------------------------------------------------------
+
+const netconfDelimiter = "]]>]]>"
+
+type rpcMsg struct {
+	XMLName   xml.Name `xml:"rpc"`
+	MessageID string   `xml:"message-id,attr"`
+	Body      rpcBody  `xml:",any"`
+}
+
+type rpcBody struct {
+	XMLName xml.Name
+	Inner   string `xml:",innerxml"`
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+func main() {
+	port := "8830"
+	if p := os.Getenv("NETCONF_PORT"); p != "" {
+		port = p
+	}
+	user := "admin"
+	if u := os.Getenv("NETCONF_USER"); u != "" {
+		user = u
+	}
+	pass := "admin"
+	if p := os.Getenv("NETCONF_PASS"); p != "" {
+		pass = p
+	}
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		log.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sshCfg := &ssh.ServerConfig{
+		PasswordCallback: func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			if conn.User() == user && string(password) == pass {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("auth failed")
+		},
+	}
+	sshCfg.AddHostKey(signer)
+
+	ds := newDataStore()
+	var sessionCounter atomic.Int64
+
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Mock NETCONF server listening on :%s (user=%s)", port, user)
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Println("accept:", err)
+			continue
+		}
+		go handleSSHConn(conn, sshCfg, ds, sessionCounter.Add(1))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SSH connection / channel handling
+// ---------------------------------------------------------------------------
+
+func handleSSHConn(nConn net.Conn, config *ssh.ServerConfig, ds *dataStore, sessionID int64) {
+	defer nConn.Close()
+
+	srvConn, chans, reqs, err := ssh.NewServerConn(nConn, config)
+	if err != nil {
+		log.Println("ssh handshake:", err)
+		return
+	}
+	defer srvConn.Close()
+	log.Printf("[session %d] user=%s connected", sessionID, srvConn.User())
+
+	go ssh.DiscardRequests(reqs)
+
+	for newCh := range chans {
+		if newCh.ChannelType() != "session" {
+			newCh.Reject(ssh.UnknownChannelType, "unknown channel type")
+			continue
+		}
+		ch, chReqs, err := newCh.Accept()
+		if err != nil {
+			log.Println("channel accept:", err)
+			continue
+		}
+		go handleChannel(ch, chReqs, ds, sessionID)
+	}
+}
+
+func handleChannel(ch ssh.Channel, reqs <-chan *ssh.Request, ds *dataStore, sessionID int64) {
+	defer ch.Close()
+
+	for req := range reqs {
+		if req.Type != "subsystem" {
+			if req.WantReply {
+				req.Reply(false, nil)
+			}
+			continue
+		}
+
+		subsystem := ""
+		if len(req.Payload) > 4 {
+			subsystem = string(req.Payload[4:])
+		}
+		if subsystem != "netconf" {
+			req.Reply(false, nil)
+			continue
+		}
+		req.Reply(true, nil)
+
+		handleNetconf(ch, ds, sessionID)
+		return
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NETCONF session
+// ---------------------------------------------------------------------------
+
+func handleNetconf(ch ssh.Channel, ds *dataStore, sessionID int64) {
+	// Send server hello
+	hello := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:candidate:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:confirmed-commit:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:validate:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:xpath:1.0</capability>
+    <capability>urn:vht:params:xml:ns:yang:vht-system?module=vht-system&amp;revision=2024-01-01</capability>
+  </capabilities>
+  <session-id>%d</session-id>
+</hello>`, sessionID)
+
+	writeMsg(ch, hello)
+
+	// Read client hello (and discard)
+	_, err := readMsg(ch)
+	if err != nil {
+		log.Printf("[session %d] read client hello: %v", sessionID, err)
+		return
+	}
+	log.Printf("[session %d] hello exchanged", sessionID)
+
+	// RPC loop
+	for {
+		msg, err := readMsg(ch)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[session %d] read rpc: %v", sessionID, err)
+			}
+			return
+		}
+
+		reply := processRPC(msg, ds, sessionID)
+		if reply == "" {
+			return // close-session
+		}
+		writeMsg(ch, reply)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RPC processing
+// ---------------------------------------------------------------------------
+
+func processRPC(raw string, ds *dataStore, sessionID int64) string {
+	var rpc rpcMsg
+	if err := xml.Unmarshal([]byte(raw), &rpc); err != nil {
+		return rpcErrorReply("0", "rpc-error", "malformed-message", "Could not parse RPC: "+err.Error())
+	}
+
+	msgID := rpc.MessageID
+	op := rpc.Body.XMLName.Local
+	inner := rpc.Body.Inner
+
+	log.Printf("[session %d] rpc: %s (msg-id=%s)", sessionID, op, msgID)
+
+	switch op {
+	case "get-config":
+		return handleGetConfig(msgID, inner, ds)
+	case "get":
+		return handleGet(msgID, inner, ds)
+	case "edit-config":
+		return handleEditConfig(msgID, inner, ds)
+	case "commit":
+		return handleCommit(msgID, ds)
+	case "validate":
+		return rpcOKReply(msgID)
+	case "discard-changes":
+		return handleDiscard(msgID, ds)
+	case "lock":
+		return handleLock(msgID, inner, ds, true)
+	case "unlock":
+		return handleLock(msgID, inner, ds, false)
+	case "close-session":
+		writeMsg(nil, "") // signal handled by caller
+		log.Printf("[session %d] close-session", sessionID)
+		return ""
+	default:
+		return rpcErrorReply(msgID, "protocol", "operation-not-supported",
+			fmt.Sprintf("Operation '%s' not supported", op))
+	}
+}
+
+// --- get-config ---
+
+func handleGetConfig(msgID, inner string, ds *dataStore) string {
+	source := extractDatastore(inner, "source")
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+
+	var data string
+	switch source {
+	case "candidate":
+		data = ds.candidate
+	default:
+		data = ds.running
+	}
+
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<rpc-reply message-id="%s" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <data>
+  %s
+  </data>
+</rpc-reply>`, msgID, data)
+}
+
+// --- get (returns same as running + operational placeholders) ---
+
+func handleGet(msgID, inner string, ds *dataStore) string {
+	ds.mu.RLock()
+	data := ds.running
+	ds.mu.RUnlock()
+
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<rpc-reply message-id="%s" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <data>
+  %s
+  </data>
+</rpc-reply>`, msgID, data)
+}
+
+// --- edit-config ---
+
+func handleEditConfig(msgID, inner string, ds *dataStore) string {
+	target := extractDatastore(inner, "target")
+	if target != "candidate" {
+		return rpcErrorReply(msgID, "protocol", "invalid-value",
+			"Only candidate datastore supports edit-config")
+	}
+
+	// Extract <config>...</config> content
+	configData := extractTag(inner, "config")
+	if configData == "" {
+		return rpcErrorReply(msgID, "protocol", "missing-element", "Missing <config> element")
+	}
+
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	if ds.locked["candidate"] {
+		// locked by someone — in real impl check session ownership
+	}
+
+	// Simple merge: replace candidate with the new config content
+	// In a real implementation this would do a proper XML merge
+	ds.candidate = configData
+
+	return rpcOKReply(msgID)
+}
+
+// --- commit ---
+
+func handleCommit(msgID string, ds *dataStore) string {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	ds.running = ds.candidate
+	log.Printf("commit: candidate -> running applied")
+	return rpcOKReply(msgID)
+}
+
+// --- discard-changes ---
+
+func handleDiscard(msgID string, ds *dataStore) string {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	ds.candidate = ds.running
+	return rpcOKReply(msgID)
+}
+
+// --- lock / unlock ---
+
+func handleLock(msgID, inner string, ds *dataStore, lock bool) string {
+	target := extractDatastore(inner, "target")
+	if target == "" {
+		target = "candidate"
+	}
+
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	if lock {
+		if ds.locked[target] {
+			return rpcErrorReply(msgID, "protocol", "lock-denied",
+				fmt.Sprintf("Datastore '%s' is already locked", target))
+		}
+		ds.locked[target] = true
+	} else {
+		delete(ds.locked, target)
+	}
+	return rpcOKReply(msgID)
+}
+
+// ---------------------------------------------------------------------------
+// XML helpers
+// ---------------------------------------------------------------------------
+
+func rpcOKReply(msgID string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<rpc-reply message-id="%s" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <ok/>
+</rpc-reply>`, msgID)
+}
+
+func rpcErrorReply(msgID, errType, errTag, errMsg string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<rpc-reply message-id="%s" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <rpc-error>
+    <error-type>%s</error-type>
+    <error-tag>%s</error-tag>
+    <error-severity>error</error-severity>
+    <error-message xml:lang="en">%s</error-message>
+  </rpc-error>
+</rpc-reply>`, msgID, errType, errTag, errMsg)
+}
+
+// extractDatastore finds <source><running/></source> or <target><candidate/></target>
+func extractDatastore(xmlStr, wrapper string) string {
+	start := strings.Index(xmlStr, "<"+wrapper+">")
+	if start < 0 {
+		return "running"
+	}
+	end := strings.Index(xmlStr, "</"+wrapper+">")
+	if end < 0 {
+		return "running"
+	}
+	content := xmlStr[start+len(wrapper)+2 : end]
+	content = strings.TrimSpace(content)
+
+	// Find <running/>, <candidate/>, <startup/>
+	for _, ds := range []string{"running", "candidate", "startup"} {
+		if strings.Contains(content, "<"+ds+"/>") || strings.Contains(content, "<"+ds+">") {
+			return ds
+		}
+	}
+	return "running"
+}
+
+// extractTag extracts inner content of a given tag
+func extractTag(xmlStr, tag string) string {
+	start := strings.Index(xmlStr, "<"+tag+">")
+	if start < 0 {
+		// try self-closing with attributes
+		start = strings.Index(xmlStr, "<"+tag+" ")
+		if start < 0 {
+			return ""
+		}
+	}
+	// Find the content after the opening tag
+	tagEnd := strings.Index(xmlStr[start:], ">")
+	if tagEnd < 0 {
+		return ""
+	}
+	contentStart := start + tagEnd + 1
+
+	endTag := "</" + tag + ">"
+	end := strings.Index(xmlStr[contentStart:], endTag)
+	if end < 0 {
+		return ""
+	}
+
+	return strings.TrimSpace(xmlStr[contentStart : contentStart+end])
+}
+
+// ---------------------------------------------------------------------------
+// NETCONF framing (base:1.0 — delimiter ]]>]]>)
+// ---------------------------------------------------------------------------
+
+func readMsg(r io.Reader) (string, error) {
+	var buf strings.Builder
+	tmp := make([]byte, 4096)
+	for {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf.Write(tmp[:n])
+			if idx := strings.Index(buf.String(), netconfDelimiter); idx >= 0 {
+				return strings.TrimSpace(buf.String()[:idx]), nil
+			}
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+}
+
+func writeMsg(w io.Writer, msg string) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintf(w, "%s\n%s\n", msg, netconfDelimiter)
+}

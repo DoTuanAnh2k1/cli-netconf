@@ -1,0 +1,8 @@
+bin/
+host_key
+host_key.pub
+*.exe
+.claude/*
+/cli-netconf
+/mock-mgt
+/mock-netconf
