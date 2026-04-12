@@ -20,118 +20,127 @@ User --SSH--> [CLI Pod :2222]
 
 ## Tính năng
 
-### Xác thực & Phân quyền
+### Xác thực & Chọn NE
 - SSH vào CLI bằng username/password
 - Xác thực qua mgt-service API (`POST /aa/authenticate`)
-- Chỉ hiển thị các NE mà user được phân quyền (`GET /aa/list/ne`)
-- Khi login tự động hiển thị danh sách NE và cho chọn NE để kết nối
-
-### Quản lý Network Element
-- Hiển thị danh sách NE (tên, site, IP, port, namespace)
-- Kết nối đến NE bằng số thứ tự hoặc tên NE
-- Kết nối qua NETCONF over SSH subsystem
+- Khi login tự động hiển thị danh sách NE và yêu cầu chọn (bằng số hoặc tên)
+- Nhập sai tên NE sẽ báo lỗi và yêu cầu nhập lại
 - Hỗ trợ multi-session: nhiều user SSH đồng thời, mỗi session độc lập
 
-### Lệnh cấu hình
+### Xem cấu hình
+- `show running-config` — xem toàn bộ config đang chạy
+- `show running-config system ntp` — filter theo path, có full path header
+- `show candidate-config` — xem bản nháp chưa commit
+- Output dạng text có indent, list entry hiển thị key value (ví dụ: `interface eth0`)
+- Khi filter, dòng đầu hiển thị full path: `system hostname ne-amf-01`
+
+### Thiết lập cấu hình
 | Lệnh | Mô tả |
 |---|---|
-| `show running-config [path...]` | Xem cấu hình running |
-| `show candidate-config [path...]` | Xem cấu hình candidate |
-| `set` | Thiết lập cấu hình candidate (nhập XML) |
+| `set <path...> <value>` | Set giá trị theo path (ví dụ: `set system hostname new-name`) |
+| `set` | Paste config (hỗ trợ cả XML và text format) |
+| `unset <path...>` | Xoá config node (ví dụ: `unset system contact`) |
 | `commit` | Áp dụng candidate vào running |
 | `validate` | Kiểm tra candidate trước khi commit |
 | `discard` | Huỷ bỏ thay đổi candidate |
-| `lock [datastore]` | Khoá datastore (tránh xung đột) |
+| `lock [datastore]` | Khoá datastore |
 | `unlock [datastore]` | Mở khoá datastore |
-| `rpc` | Gửi raw NETCONF XML RPC |
 
-### Hiển thị cấu hình dạng text
-- Output dạng text có indent, không phải XML raw
-- Container hiển thị tên + xuống dòng, leaf hiển thị `tên    giá trị`
-- List entry tự động hiển thị key value cạnh tên (ví dụ: `interface eth0`, `server 10.0.0.1`)
-- Filter theo path: `show running-config system ntp server` chỉ hiển thị phần được chỉ định
+### Paste config dạng text
+Có thể copy output của `show running-config` rồi paste ngược lại vào `set`:
+
+```
+admin[ne-amf-01]> set
+Enter config (XML or text format, end with '.' on a new line):
+system
+  hostname                 new-hostname
+  location                 New Location
+  ntp
+    enabled                true
+.
+OK
+```
+
+CLI tự động nhận diện text format (không có `<` `>`) và convert sang XML.
+
+### Export config
+| Lệnh | Mô tả |
+|---|---|
+| `dump text [filename]` | Export config dạng text indent |
+| `dump xml [filename]` | Export config dạng XML |
+
+Không có filename sẽ output ra terminal.
 
 ### Tab Completion
-- Tab để auto-complete lệnh: `sh<TAB>` → `show`
-- Tab để complete sub-command: `show r<TAB>` → `show running-config`
-- Tab để duyệt config path: `show running-config system <TAB>` → hiện tất cả children
-- Tab lần 2 (khi có nhiều lựa chọn) hiển thị danh sách options
-- Schema tree được tự động load từ running config khi kết nối NE
+- Tab complete lệnh: `sh<TAB>` → `show`
+- Tab complete sub-command: `show r<TAB>` → `show running-config`
+- Tab complete config path: `show running-config system n<TAB>` → `ntp`
+- Tab complete cho `set`, `unset`: `set system host<TAB>` → `hostname`
+- Tab complete cho `dump`: `dump t<TAB>` → `text`
+- Schema tự động load từ YANG (get-schema RFC 6022) + running config
+- Thấy được tất cả leaf/container kể cả chưa set giá trị
+
+### Graceful Shutdown
+- Server nhận SIGINT/SIGTERM → đóng tất cả active SSH sessions → thoát sạch
+- Timeout 10s cho shutdown, không bị treo nếu có user đang kết nối
 
 ### Lịch sử & Logging
 - Tự động lưu command history qua mgt-service (`POST /aa/history/save`)
 - Hiển thị thời gian thực thi mỗi lệnh
-- Server log: auth events, connections
-
-### Khác
-- ANSI color output (prompt, error, success)
-- Multiline XML input cho lệnh `set` và `rpc` (kết thúc bằng `.` trên dòng riêng)
-- Timeout cho mỗi NETCONF operation (tránh treo)
-- Đã test với 1000 config entries (~289KB XML) - không crash, không treo
 
 ## Cấu trúc project
 
 ```
 cli-netconf/
-├── cmd/cli-netconf/main.go           # Entry point, khởi tạo SSH server
+├── main.go                           # Entry point, graceful shutdown
 ├── internal/
-│   ├── config/config.go              # Đọc cấu hình từ env vars
+│   ├── config/config.go              # Cấu hình từ env vars
 │   ├── api/client.go                 # HTTP client cho mgt-service API
 │   ├── netconf/client.go             # NETCONF over SSH client (RFC 6241)
 │   └── server/
-│       ├── server.go                 # SSH server, password auth
+│       ├── server.go                 # SSH server, graceful shutdown
 │       ├── session.go                # Interactive shell, session lifecycle
-│       ├── cmd_general.go            # Lệnh: show, connect, help, exit...
-│       ├── cmd_netconf.go            # Lệnh: set, commit, validate, lock...
-│       ├── completer.go              # Tab completion + schema tree
-│       └── formatter.go              # XML → text formatter
+│       ├── cmd_general.go            # show, connect, help, exit, loadSchema
+│       ├── cmd_netconf.go            # set, unset, commit, dump, lock, rpc
+│       ├── completer.go             # Tab completion, YANG parser, schema tree
+│       └── formatter.go              # XML→text, text→XML, dump formats
 ├── test/
-│   ├── yang/vht-system.yang          # YANG model mẫu (system, interfaces)
-│   ├── mock-netconf/main.go          # Mock NETCONF server để test
-│   ├── mock-mgt/main.go             # Mock mgt-service API để test
-│   ├── e2e_test.go                   # E2E tests
-│   ├── completion_test.go            # Tab completion tests
-│   ├── stress_test.go                # Stress tests (500-1000 configs, multi-session)
-│   └── run.sh                        # Script chạy tất cả mock + CLI
+│   ├── yang/vht-system.yang          # YANG model mẫu
+│   ├── mock-netconf/main.go          # Mock NETCONF server (get-schema support)
+│   ├── mock-mgt/main.go             # Mock mgt-service API
+│   ├── e2e_test.go                   # 28 tests (all-in-one)
+│   └── run.sh                        # Script chạy mock servers
 ├── deploy/k8s.yaml                   # K8s Deployment + Service
-├── Dockerfile                        # Multi-stage build (~11MB image)
-├── Makefile                          # Build, run, docker
+├── Dockerfile                        # Multi-stage build (~11MB)
+├── Makefile
 ├── mgt-service.yaml                  # OpenAPI spec của mgt-service
-├── go.mod / go.sum
-└── .gitignore
+└── go.mod
 ```
 
 ## Cài đặt & Chạy
-
-### Yêu cầu
-- Go 1.22+
 
 ### Build
 
 ```bash
 make build
-# hoặc
-go build -o bin/cli-netconf ./cmd/cli-netconf
 ```
 
-### Cấu hình (Environment Variables)
+### Cấu hình
 
 | Biến | Mặc định | Mô tả |
 |---|---|---|
-| `SSH_ADDR` | `:2222` | Địa chỉ SSH server lắng nghe |
-| `SSH_HOST_KEY_PATH` | _(trống = tự tạo)_ | Đường dẫn SSH host key (ED25519) |
-| `MGT_SERVICE_URL` | `http://mgt-service:3000` | URL của mgt-service API |
-| `NETCONF_USERNAME` | `admin` | Service account để kết nối NETCONF đến NE |
-| `NETCONF_PASSWORD` | `admin` | Mật khẩu service account |
-| `NETCONF_TIMEOUT` | `30s` | Timeout kết nối NETCONF |
+| `SSH_ADDR` | `:2222` | Địa chỉ SSH server |
+| `SSH_HOST_KEY_PATH` | _(tự tạo)_ | SSH host key (ED25519) |
+| `MGT_SERVICE_URL` | `http://mgt-service:3000` | URL mgt-service API |
+| `NETCONF_USERNAME` | `admin` | Account kết nối NETCONF |
+| `NETCONF_PASSWORD` | `admin` | Mật khẩu NETCONF |
+| `NETCONF_TIMEOUT` | `30s` | Timeout kết nối |
 
-### Chạy local (dev)
+### Chạy local
 
 ```bash
-# Chạy với mock servers (mgt-service + NETCONF)
 ./test/run.sh
-
-# Hoặc chạy từng thành phần
+# Hoặc
 MGT_SERVICE_URL=http://127.0.0.1:3000 ./bin/cli-netconf
 ```
 
@@ -139,14 +148,11 @@ MGT_SERVICE_URL=http://127.0.0.1:3000 ./bin/cli-netconf
 
 ```bash
 ssh admin@127.0.0.1 -p 2222
-# Mật khẩu: admin
 ```
 
 ## Cách sử dụng
 
-### Login và chọn NE
-
-Khi SSH vào, CLI tự động hiển thị danh sách NE và yêu cầu chọn:
+### Login
 
 ```
 ============================================
@@ -158,65 +164,42 @@ Khi SSH vào, CLI tự động hiển thị danh sách NE và yêu cầu chọn:
   2  ne-smf-01   HNI   10.0.1.20  830  5gc-hni    SMF Node
 
 Select NE [1-2 or name]: ne-amf-01
-Connecting to ne-amf-01 (10.0.1.10:830)...
 Connected. NETCONF session ID: 42
 ```
 
-Có thể nhập số thứ tự hoặc tên NE. Nhập sai sẽ yêu cầu nhập lại.
-
-### Xem cấu hình
-
-```
-admin[ne-amf-01]> show running-config
-system
-  hostname                ne-amf-01
-  location                HCM Data Center
-  contact                 noc@vht.com.vn
-  ntp
-    enabled               true
-    server 10.0.0.1
-      prefer              true
-    server 10.0.0.2
-      prefer              false
-  dns
-    search                vht.internal
-    search                vht.com.vn
-    server 8.8.8.8
-    server 8.8.4.4
-interfaces
-  interface eth0
-    description           Management Interface
-    enabled               true
-    mtu                   1500
-    ipv4
-      address             10.0.1.10
-      prefix-length       24
-      gateway             10.0.1.1
-```
-
-### Filter theo path
+### Xem config
 
 ```
 admin[ne-amf-01]> show running-config system ntp
-ntp
+system ntp
   enabled               true
   server 10.0.0.1
     prefer              true
   server 10.0.0.2
     prefer              false
 
-admin[ne-amf-01]> show running-config system contact
-contact                 noc@vht.com.vn
+admin[ne-amf-01]> show running-config system hostname
+system hostname                 ne-amf-01
 ```
 
-### Thiết lập cấu hình
+### Set config
 
 ```
+# Inline
+admin[ne-amf-01]> set system hostname new-name
+OK
+
+# Paste text format
 admin[ne-amf-01]> set
-Enter config XML (end with '.' on a new line):
-<system xmlns="urn:vht:params:xml:ns:yang:vht-system">
-  <hostname>ne-amf-01-updated</hostname>
-</system>
+Enter config (XML or text format, end with '.' on a new line):
+interfaces interface
+  name                     veth0
+  description              Virtual Interface 0
+  enabled                  true
+  mtu                      1500
+  ipv4
+    address                  10.0.0.0
+    prefix-length            24
 .
 OK
 
@@ -224,154 +207,115 @@ admin[ne-amf-01]> commit
 Commit successful.
 ```
 
-### Lock/Unlock datastore
+### Xoá config
 
 ```
-admin[ne-amf-01]> lock
-Locked candidate.
-
-admin[ne-amf-01]> set
-...
+admin[ne-amf-01]> unset system contact
+OK
 admin[ne-amf-01]> commit
 Commit successful.
-
-admin[ne-amf-01]> unlock
-Unlocked candidate.
 ```
 
-### Gửi raw NETCONF RPC
+### Export
 
 ```
-admin[ne-amf-01]> rpc
-Enter RPC body XML (end with '.' on a new line):
-<get-config>
-  <source><running/></source>
-</get-config>
-.
+admin[ne-amf-01]> dump text /tmp/config.txt
+Saved to /tmp/config.txt (259351 bytes)
+
+admin[ne-amf-01]> dump xml /tmp/config.xml
+Saved to /tmp/config.xml (289471 bytes)
 ```
 
 ### Tab completion
 
 ```
-admin[ne-amf-01]> sh<TAB>                     → show
-admin[ne-amf-01]> show r<TAB>                  → show running-config
-admin[ne-amf-01]> show running-config sys<TAB> → show running-config system
-admin[ne-amf-01]> show running-config system <TAB><TAB>
+admin[ne-amf-01]> sh<TAB>                          → show
+admin[ne-amf-01]> show running-config system <TAB>
   contact    dns        hostname   location   logging    ntp
+admin[ne-amf-01]> set system host<TAB>              → set system hostname
+admin[ne-amf-01]> unset sys<TAB>                    → unset system
 ```
 
-### Danh sách lệnh
-
-```
-admin[ne-amf-01]> help
-```
-
-## Deploy lên K8s
-
-### 1. Tạo secrets
+## Deploy K8s
 
 ```bash
+# Secrets
 ssh-keygen -t ed25519 -f host_key -N ""
 kubectl create secret generic cli-netconf-host-key --from-file=host_key
-
 kubectl create secret generic cli-netconf-secret \
   --from-literal=netconf-username=admin \
   --from-literal=netconf-password=<password>
-```
 
-### 2. Build & push image
-
-```bash
+# Deploy
 make docker-build
-docker tag cli-netconf <registry>/cli-netconf:latest
-docker push <registry>/cli-netconf:latest
-```
-
-### 3. Deploy
-
-```bash
 kubectl apply -f deploy/k8s.yaml
-```
-
-### 4. Truy cập
-
-```bash
-kubectl get svc cli-netconf
-ssh admin@<node-ip> -p <node-port>
 ```
 
 ## Testing
 
-### Chạy tất cả tests
-
 ```bash
-# Build mock servers
+# Build + start mock servers
+make build
 go build -o bin/mock-mgt ./test/mock-mgt
 go build -o bin/mock-netconf ./test/mock-netconf
-go build -o bin/cli-netconf ./cmd/cli-netconf
-
-# Khởi động
-./bin/mock-mgt &
-./bin/mock-netconf &
+./bin/mock-mgt & ./bin/mock-netconf &
 MGT_SERVICE_URL=http://127.0.0.1:3000 ./bin/cli-netconf &
 
-# Chạy tests
+# Run 28 tests
 go test -v -timeout 300s ./test/
 ```
 
-### Test cases
+### Test cases (28 tests)
 
-| Test | Mô tả |
-|---|---|
-| TestWelcomeBanner | Hiển thị banner khi login |
-| TestShowNE | Danh sách NE |
-| TestConnectAndGetConfig | Kết nối + lấy config |
-| TestEditConfigAndCommit | Sửa + commit config |
-| TestLockUnlock | Lock/unlock datastore |
-| TestDiscardChanges | Discard changes |
-| TestHelp | Hiển thị help |
-| TestUnknownCommand | Xử lý lệnh không hợp lệ |
-| TestTabCompleteCommand | Tab complete lệnh |
-| TestTabCompleteShowNe | Tab complete sub-command |
-| TestTabCompleteXpath | Tab complete config path |
-| TestTabMultipleCompletions | Hiển thị nhiều options |
-| TestStressSet500Configs | Set 500 interfaces (145KB) |
-| TestStressSet1000Configs | Set 1000 interfaces (289KB) |
-| TestMultiSession | 5 sessions SSH đồng thời |
-
-### Mock servers
-
-| Service | Port | Mô tả |
+| # | Test | Mô tả |
 |---|---|---|
-| mock-mgt | 3000 | Mock mgt-service API (users: admin/admin, operator/operator123) |
-| mock-netconf | 8830 | Mock NETCONF server với YANG model vht-system |
+| 1 | WelcomeBannerAndNEList | Banner + auto NE list |
+| 2 | ConnectByName | Kết nối NE bằng tên + validate input |
+| 3 | ShowNE | Danh sách NE |
+| 4 | ShowRunningConfig | Xem toàn bộ config |
+| 5 | ShowRunningConfigPathHeader | Full path prefix (system hostname ...) |
+| 6 | SetInline | set system hostname value |
+| 7 | SetXML | Paste XML config |
+| 8 | SetTextConfigPaste | Paste text config format → auto convert XML |
+| 9 | SetAndCommit | Set + commit flow |
+| 10 | Unset | Xoá config node |
+| 11 | Validate | Validate candidate |
+| 12 | Discard | Discard changes |
+| 13 | LockUnlock | Lock/unlock datastore |
+| 14 | DumpText | Export text file |
+| 15 | DumpXML | Export XML file |
+| 16 | DumpToTerminal | Dump ra terminal |
+| 17 | TabCompleteCommand | Tab lệnh |
+| 18 | TabCompleteShowSubcommand | Tab sub-command |
+| 19 | TabCompleteConfigPath | Tab config path |
+| 20 | TabCompleteSet | Tab cho set |
+| 21 | TabCompleteUnset | Tab cho unset |
+| 22 | TabCompleteMultipleOptions | Hiển thị nhiều options |
+| 23 | Help | Help text |
+| 24 | UnknownCommand | Xử lý lệnh sai |
+| 25 | Stress500Configs | Set 500 interfaces (127KB) |
+| 26 | Stress1000Configs | Set 1000 interfaces (253KB) |
+| 27 | MultiSession | 5 SSH sessions đồng thời |
 
-### YANG model mẫu (vht-system)
+## Tổng hợp tất cả tính năng đã phát triển
 
-Mock NETCONF server sử dụng YANG model `vht-system` với:
-- `system`: hostname, location, contact, ntp, dns, logging
-- `interfaces`: danh sách interface với ipv4 config
-
-Xem chi tiết tại `test/yang/vht-system.yang`.
-
-## Stress test kết quả
-
-| Test | Config size | Thời gian | Kết quả |
-|---|---|---|---|
-| Set 500 interfaces | 145KB XML | ~14s | OK, không crash |
-| Set 1000 interfaces | 289KB XML | ~18s | OK, không crash |
-| Show 1000 interfaces | 334KB output | Instant | OK, không treo |
-| 5 sessions đồng thời | - | ~6s | Tất cả OK |
-
-## So sánh với Java + MaAPI
-
-| | Java + MaAPI | Go + NETCONF |
-|---|---|---|
-| Giao thức | MaAPI (IPC, blocking) | NETCONF over SSH (non-blocking) |
-| Concurrency | Thread (nặng, giới hạn) | Goroutine (nhẹ, hàng triệu) |
-| Timeout | Không có → treo | Context + deadline mỗi RPC |
-| Large config | Treo khi config dài | Test OK với 1000 entries (289KB) |
-| Multi-session | Giới hạn thread | Test OK 5 sessions đồng thời |
-| Memory | JVM ~200MB+ | ~10-20MB |
-| Binary | Cần JRE | Single binary ~11MB |
-| K8s image | ~300MB+ | ~15MB (Alpine) |
+1. **SSH server** với password auth qua mgt-service REST API (JWT)
+2. **Auto NE selection** khi login — hiển thị danh sách, chọn bằng số hoặc tên, validate input
+3. **NETCONF client** thuần Go — SSH subsystem, hello exchange, RPC send/receive
+4. **show running-config / candidate-config** với path filter + full path header
+5. **Text output format** — indent, list key display, không raw XML
+6. **set** — 3 mode: inline path+value, paste XML, paste text config (auto-detect)
+7. **unset** — xoá config node via NETCONF operation="delete"
+8. **commit / validate / discard** — candidate datastore workflow
+9. **lock / unlock** — datastore locking
+10. **dump text / xml** — export config ra file hoặc terminal
+11. **Tab completion** — commands, sub-commands, config paths (từ YANG + running config)
+12. **YANG schema loading** — get-schema (RFC 6022) + merge running config
+13. **Graceful shutdown** — SIGINT/SIGTERM → đóng active sessions → thoát sạch
+14. **Multi-session** — goroutine per session, test 5 concurrent OK
+15. **Stress tested** — 1000 configs (253KB), show 230KB output, không crash/treo
+16. **Optimized NETCONF read** — 64KB buffer, tail-only delimiter search
+17. **Mock servers** — mgt-service + NETCONF/ConfD với get-schema support
+18. **28 automated tests** — e2e, tab completion, stress, multi-session
+19. **K8s deployment** — Dockerfile (~11MB), k8s.yaml, secrets
+20. **Module** — `github.com/DoTuanAnh2k1/cli-netconf`, Go 1.25

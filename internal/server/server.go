@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
@@ -21,13 +22,18 @@ const (
 	keySystemType contextKey = "system_type"
 )
 
-func Start(cfg *config.Config, apiClient *api.Client) error {
+// Server wraps the SSH server for graceful shutdown support.
+type Server struct {
+	ssh *gssh.Server
+}
+
+func New(cfg *config.Config, apiClient *api.Client) (*Server, error) {
 	signer, err := loadOrGenerateHostKey(cfg.HostKeyPath)
 	if err != nil {
-		return fmt.Errorf("host key: %w", err)
+		return nil, fmt.Errorf("host key: %w", err)
 	}
 
-	server := &gssh.Server{
+	sshServer := &gssh.Server{
 		Addr: cfg.SSHAddr,
 		Handler: func(s gssh.Session) {
 			handleSession(s, apiClient, cfg)
@@ -44,10 +50,19 @@ func Start(cfg *config.Config, apiClient *api.Client) error {
 			return true
 		},
 	}
-	server.AddHostKey(signer)
+	sshServer.AddHostKey(signer)
 
-	slog.Info("SSH server starting", "addr", cfg.SSHAddr)
-	return server.ListenAndServe()
+	return &Server{ssh: sshServer}, nil
+}
+
+func (s *Server) ListenAndServe() error {
+	slog.Info("SSH server starting", "addr", s.ssh.Addr)
+	return s.ssh.ListenAndServe()
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	slog.Info("SSH server shutting down (closing active sessions)...")
+	return s.ssh.Shutdown(ctx)
 }
 
 func loadOrGenerateHostKey(path string) (gossh.Signer, error) {

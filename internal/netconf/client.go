@@ -242,6 +242,29 @@ func (c *Client) Unlock(ctx context.Context, target string) (string, error) {
 	return c.SendRPC(ctx, body)
 }
 
+func (c *Client) GetSchema(ctx context.Context, identifier string) (string, error) {
+	body := fmt.Sprintf(`  <get-schema xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring">
+    <identifier>%s</identifier>
+    <format>yang</format>
+  </get-schema>`, identifier)
+	return c.SendRPC(ctx, body)
+}
+
+// ExtractModules returns YANG module names from server capabilities.
+func (c *Client) ExtractModules() []string {
+	var modules []string
+	for _, cap := range c.Capabilities {
+		if idx := strings.Index(cap, "?module="); idx >= 0 {
+			rest := cap[idx+8:]
+			if amp := strings.Index(rest, "&"); amp >= 0 {
+				rest = rest[:amp]
+			}
+			modules = append(modules, rest)
+		}
+	}
+	return modules
+}
+
 func (c *Client) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

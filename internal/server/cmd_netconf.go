@@ -25,16 +25,21 @@ func (s *session) cmdSet(args []string) {
 			return
 		}
 	} else if len(args) == 0 {
-		// set (no args)  →  multiline XML input
-		s.writef("Enter config XML (end with '%s.%s' on a new line):\n", colorYellow, colorReset)
-		xmlData = s.readMultiline()
-		if xmlData == "" {
+		// set (no args)  →  multiline input (XML or text config)
+		s.writef("Enter config (XML or text format, end with '%s.%s' on a new line):\n", colorYellow, colorReset)
+		input := s.readMultiline()
+		if input == "" {
 			s.writef("Cancelled.\n")
 			return
 		}
-	} else {
+		if isTextConfig(input) {
+			xmlData = textConfigToXML(input, s.schema)
+		} else {
+			xmlData = input
+		}
+	} else if len(args) == 1 {
 		s.writef("Usage: set <path...> <value>\n")
-		s.writef("       set                     (XML input mode)\n")
+		s.writef("       set                     (paste config mode)\n")
 		return
 	}
 
@@ -96,6 +101,90 @@ func (s *session) buildSetXML(path []string, value string) string {
 	buf.WriteString(fmt.Sprintf("<%s>%s</%s>\n", leafName, value, leafName))
 
 	// Closing tags (reverse order, skip the leaf)
+	for i := len(path) - 2; i >= 0; i-- {
+		buf.WriteString(strings.Repeat("  ", i))
+		buf.WriteString(fmt.Sprintf("</%s>\n", path[i]))
+	}
+
+	return buf.String()
+}
+
+func (s *session) cmdUnset(args []string) {
+	if !s.requireConnection() {
+		return
+	}
+
+	if len(args) == 0 {
+		s.writef("Usage: unset <path...>\n")
+		s.writef("  e.g. unset system contact\n")
+		s.writef("       unset interfaces interface eth2\n")
+		return
+	}
+
+	xmlData := s.buildUnsetXML(args)
+	if xmlData == "" {
+		s.writef("%sInvalid path: %s%s\n", colorRed, strings.Join(args, " "), colorReset)
+		return
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	reply, err := s.nc.EditConfig(ctx, "candidate", xmlData)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		s.writef("%sError: %s%s\n", colorRed, err, colorReset)
+		return
+	}
+
+	if isRPCOK(reply) {
+		s.writef("%sOK%s\n", colorGreen, colorReset)
+	} else if isRPCError(reply) {
+		s.writef("%sError: %s%s\n", colorRed, extractRPCErrorMessage(reply), colorReset)
+	} else {
+		s.writef("%s\n", reply)
+	}
+	s.writef("%s(%s)%s\n", colorDim, elapsed.Round(time.Millisecond), colorReset)
+	s.saveHistory("unset", elapsed)
+}
+
+// buildUnsetXML converts "unset system contact" into NETCONF edit-config XML
+// with operation="delete" on the target element.
+func (s *session) buildUnsetXML(path []string) string {
+	if s.schema == nil || len(path) == 0 {
+		return ""
+	}
+
+	topName := path[0]
+	topNode, ok := s.schema.children[topName]
+	if !ok {
+		return ""
+	}
+
+	var buf strings.Builder
+	nc := "urn:ietf:params:xml:ns:netconf:base:1.0"
+
+	// Opening tags
+	ns := topNode.namespace
+	if ns != "" {
+		buf.WriteString(fmt.Sprintf("<%s xmlns=\"%s\" xmlns:nc=\"%s\">\n", path[0], ns, nc))
+	} else {
+		buf.WriteString(fmt.Sprintf("<%s xmlns:nc=\"%s\">\n", path[0], nc))
+	}
+	for i := 1; i < len(path)-1; i++ {
+		buf.WriteString(strings.Repeat("  ", i))
+		buf.WriteString(fmt.Sprintf("<%s>\n", path[i]))
+	}
+
+	// Target element with delete operation
+	last := path[len(path)-1]
+	depth := len(path) - 1
+	buf.WriteString(strings.Repeat("  ", depth))
+	buf.WriteString(fmt.Sprintf("<%s nc:operation=\"delete\"/>\n", last))
+
+	// Closing tags
 	for i := len(path) - 2; i >= 0; i-- {
 		buf.WriteString(strings.Repeat("  ", i))
 		buf.WriteString(fmt.Sprintf("</%s>\n", path[i]))

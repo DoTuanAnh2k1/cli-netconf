@@ -152,11 +152,19 @@ func formatXMLResponse(xmlData string, path []string) string {
 		if node == nil {
 			return fmt.Sprintf("%spath not found: %s%s\n", colorRed, strings.Join(path, " "), colorReset)
 		}
-		if len(node.children) > 0 {
-			return formatTree([]*xmlNode{node}, 0)
+		prefix := strings.Join(path[:len(path)-1], " ")
+		if prefix != "" {
+			prefix += " "
 		}
-		// Single leaf
-		return fmt.Sprintf("%-24s %s%s%s\n", node.name, colorCyan, node.value, colorReset)
+		if len(node.children) > 0 {
+			// Container/list — show path prefix on first line, children indented
+			var buf strings.Builder
+			buf.WriteString(fmt.Sprintf("%s%s%s%s\n", colorDim, prefix, colorReset, node.name))
+			writeNodes(&buf, node.children, 1)
+			return buf.String()
+		}
+		// Single leaf — "system hostname ne-amf-01"
+		return fmt.Sprintf("%s%s%s%s %s%s%s\n", colorDim, prefix, colorReset, node.name, colorCyan, node.value, colorReset)
 	}
 
 	return formatTree(tree, 0)
@@ -228,6 +236,92 @@ func extractDataXML(xmlData string) string {
 		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n" + content + "\n</config>\n"
 	}
 	return xmlData
+}
+
+// ---------------------------------------------------------------------------
+// Text config → XML converter (for paste-to-set feature)
+// ---------------------------------------------------------------------------
+
+// textConfigToXML converts indented text config format back to XML.
+// Input format (output of show running-config):
+//
+//	system
+//	  hostname                 ne-amf-01
+//	  ntp
+//	    enabled                true
+//
+// Output:
+//
+//	<system><hostname>ne-amf-01</hostname><ntp><enabled>true</enabled></ntp></system>
+func textConfigToXML(text string, schema *schemaNode) string {
+	lines := strings.Split(text, "\n")
+	type stackEntry struct {
+		name  string
+		depth int
+	}
+	var stack []stackEntry
+	var buf strings.Builder
+
+	for _, raw := range lines {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+
+		// Calculate indent depth (2 spaces = 1 level)
+		trimmed := strings.TrimLeft(raw, " ")
+		indent := (len(raw) - len(trimmed)) / 2
+
+		// Close tags for nodes at same or deeper depth
+		for len(stack) > 0 && stack[len(stack)-1].depth >= indent {
+			top := stack[len(stack)-1]
+			buf.WriteString(fmt.Sprintf("</%s>", top.name))
+			stack = stack[:len(stack)-1]
+		}
+
+		// Parse the line: could be "container" or "key  value"
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 {
+			continue
+		}
+
+		name := fields[0]
+
+		if len(fields) == 1 {
+			// Container — open tag, push to stack
+			if indent == 0 && schema != nil {
+				if topNode, ok := schema.children[name]; ok && topNode.namespace != "" {
+					buf.WriteString(fmt.Sprintf("<%s xmlns=\"%s\">", name, topNode.namespace))
+				} else {
+					buf.WriteString(fmt.Sprintf("<%s>", name))
+				}
+			} else {
+				buf.WriteString(fmt.Sprintf("<%s>", name))
+			}
+			stack = append(stack, stackEntry{name, indent})
+		} else {
+			// Leaf — key + value(s)
+			value := strings.Join(fields[1:], " ")
+			buf.WriteString(fmt.Sprintf("<%s>%s</%s>", name, value, name))
+		}
+	}
+
+	// Close remaining open tags
+	for i := len(stack) - 1; i >= 0; i-- {
+		buf.WriteString(fmt.Sprintf("</%s>", stack[i].name))
+	}
+
+	return buf.String()
+}
+
+// isTextConfig detects if input is text config format (indented key-value)
+// rather than XML. Simple heuristic: no < or > characters in the first line.
+func isTextConfig(text string) bool {
+	first := strings.TrimSpace(text)
+	if first == "" {
+		return false
+	}
+	firstLine := strings.SplitN(first, "\n", 2)[0]
+	return !strings.Contains(firstLine, "<")
 }
 
 // isRPCOK checks if the rpc-reply contains <ok/>

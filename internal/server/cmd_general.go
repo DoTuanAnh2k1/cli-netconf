@@ -194,16 +194,92 @@ func (s *session) cmdDisconnect() {
 }
 
 func (s *session) loadSchema() {
+	s.schema = newSchemaNode()
+
+	// 1. Try loading YANG modules via get-schema (RFC 6022)
+	modules := s.nc.ExtractModules()
+	for _, mod := range modules {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		reply, err := s.nc.GetSchema(ctx, mod)
+		cancel()
+		if err != nil {
+			continue
+		}
+		// Extract YANG text from rpc-reply <data>...</data>
+		yangText := extractSchemaText(reply)
+		if yangText == "" {
+			continue
+		}
+		// Find namespace from capabilities
+		ns := findNamespace(s.nc.Capabilities, mod)
+		parsed := parseSchemaFromYANG(yangText, ns)
+		mergeSchema(s.schema, parsed)
+		slog.Info("schema loaded from YANG", "module", mod, "elements", parsed.childNames())
+	}
+
+	// 2. Merge with running config to capture any runtime-only nodes
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	reply, err := s.nc.GetConfig(ctx, "running", "")
-	if err != nil {
-		slog.Warn("load schema failed", "error", err)
-		return
+	if err == nil {
+		configSchema := parseSchemaFromXML(reply)
+		mergeSchema(s.schema, configSchema)
 	}
-	s.schema = parseSchemaFromXML(reply)
-	if s.schema != nil {
-		slog.Info("schema loaded", "top_elements", s.schema.childNames())
+
+	if len(s.schema.children) > 0 {
+		slog.Info("schema ready", "top_elements", s.schema.childNames())
+	}
+}
+
+// extractSchemaText extracts YANG text from get-schema rpc-reply
+func extractSchemaText(reply string) string {
+	// <data xmlns="...">YANG TEXT</data>
+	start := strings.Index(reply, "<data")
+	if start < 0 {
+		return ""
+	}
+	gt := strings.Index(reply[start:], ">")
+	if gt < 0 {
+		return ""
+	}
+	contentStart := start + gt + 1
+	end := strings.LastIndex(reply, "</data>")
+	if end <= contentStart {
+		return ""
+	}
+	text := reply[contentStart:end]
+	// Unescape XML entities
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	return text
+}
+
+// findNamespace finds namespace for a module from capabilities
+func findNamespace(caps []string, module string) string {
+	for _, cap := range caps {
+		if strings.Contains(cap, "module="+module) {
+			if idx := strings.Index(cap, "?"); idx > 0 {
+				return cap[:idx]
+			}
+		}
+	}
+	return ""
+}
+
+// mergeSchema merges src into dst recursively
+func mergeSchema(dst, src *schemaNode) {
+	for name, srcChild := range src.children {
+		dstChild, exists := dst.children[name]
+		if !exists {
+			dst.children[name] = srcChild
+		} else {
+			if srcChild.namespace != "" && dstChild.namespace == "" {
+				dstChild.namespace = srcChild.namespace
+			}
+			mergeSchema(dstChild, srcChild)
+		}
 	}
 }
 
@@ -220,7 +296,9 @@ func (s *session) cmdHelp() {
 %sConfiguration commands (requires connection):%s
   show running-config [path...]      Show running configuration
   show candidate-config [path...]    Show candidate configuration
-  set                                Set candidate config (XML input)
+  set                                Set config (paste XML or text format)
+  set <path...> <value>              Set a config value by path
+  unset <path...>                    Delete a config node
   commit                             Commit candidate to running
   validate                           Validate candidate configuration
   discard                            Discard candidate changes

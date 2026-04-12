@@ -98,6 +98,8 @@ func (s *session) run() {
 			s.cmdDisconnect()
 		case "set":
 			s.cmdSet(args)
+		case "unset":
+			s.cmdUnset(args)
 		case "commit":
 			s.cmdCommit()
 		case "validate":

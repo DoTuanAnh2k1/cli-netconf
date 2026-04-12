@@ -48,6 +48,84 @@ func (n *schemaNode) lookup(path []string) *schemaNode {
 	return node
 }
 
+// parseSchemaFromYANG parses a simplified YANG module text and builds a schema tree.
+// Handles: container, list, leaf, leaf-list with nesting.
+func parseSchemaFromYANG(yangText string, ns string) *schemaNode {
+	root := newSchemaNode()
+	lines := strings.Split(yangText, "\n")
+
+	var stack []*schemaNode
+	stack = append(stack, root)
+
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+
+		// Skip YANG metadata keywords
+		skip := false
+		for _, kw := range []string{
+			"namespace ", "prefix ", "key ", "type ", "revision ",
+			"organization ", "description", "default ", "range ",
+			"length ", "ordered-by ", "nullable ", "enum ", "format ",
+		} {
+			if strings.HasPrefix(line, kw) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		// module X { — treat as transparent (push root, not a new node)
+		if strings.HasPrefix(line, "module ") {
+			if strings.HasSuffix(line, "{") {
+				stack = append(stack, root)
+			}
+			continue
+		}
+
+		if line == "}" {
+			if len(stack) > 1 {
+				stack = stack[:len(stack)-1]
+			}
+			continue
+		}
+
+		for _, keyword := range []string{"container ", "list ", "leaf-list ", "leaf "} {
+			if strings.HasPrefix(line, keyword) {
+				nameEnd := strings.IndexAny(line[len(keyword):], " {;")
+				name := line[len(keyword):]
+				if nameEnd >= 0 {
+					name = line[len(keyword) : len(keyword)+nameEnd]
+				}
+				name = strings.TrimSpace(name)
+
+				parent := stack[len(stack)-1]
+				child, exists := parent.children[name]
+				if !exists {
+					child = newSchemaNode()
+					parent.children[name] = child
+				}
+
+				// Track namespace on top-level containers
+				if parent == root && ns != "" {
+					child.namespace = ns
+				}
+
+				if strings.HasSuffix(line, "{") {
+					stack = append(stack, child)
+				}
+				break
+			}
+		}
+	}
+
+	return root
+}
+
 // parseSchemaFromXML extracts the element hierarchy from a get-config rpc-reply.
 func parseSchemaFromXML(xmlData string) *schemaNode {
 	root := newSchemaNode()
@@ -116,7 +194,7 @@ var commandsBase = []string{
 var commandsConnected = []string{
 	"commit", "connect", "discard", "disconnect",
 	"dump", "exit", "help", "lock", "rpc",
-	"set", "show", "unlock", "validate",
+	"set", "show", "unlock", "unset", "validate",
 }
 
 var showSubcommands = []string{"candidate-config", "ne", "running-config"}
@@ -209,7 +287,7 @@ func (s *session) completeArgs(cmd string, args []string, word string) []string 
 		}
 		return filterByPrefix(opts, word)
 
-	case "set":
+	case "set", "unset":
 		return s.pathCompletions(args, word)
 
 	case "dump":

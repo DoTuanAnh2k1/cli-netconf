@@ -316,6 +316,8 @@ func processRPC(raw string, ds *dataStore, sessionID int64) string {
 		return handleLock(msgID, inner, ds, true)
 	case "unlock":
 		return handleLock(msgID, inner, ds, false)
+	case "get-schema":
+		return handleGetSchema(msgID, inner)
 	case "close-session":
 		writeMsg(nil, "") // signal handled by caller
 		log.Printf("[session %d] close-session", sessionID)
@@ -434,6 +436,86 @@ func handleLock(msgID, inner string, ds *dataStore, lock bool) string {
 	}
 	return rpcOKReply(msgID)
 }
+
+// --- get-schema (RFC 6022) ---
+
+func handleGetSchema(msgID, inner string) string {
+	// Extract identifier from <identifier>vht-system</identifier>
+	identifier := extractTag(inner, "identifier")
+	if identifier == "" {
+		return rpcErrorReply(msgID, "protocol", "missing-element", "Missing <identifier>")
+	}
+
+	schema, ok := yangSchemas[identifier]
+	if !ok {
+		return rpcErrorReply(msgID, "data", "invalid-value",
+			fmt.Sprintf("Schema '%s' not found", identifier))
+	}
+
+	// Escape XML special chars in YANG text
+	escaped := strings.ReplaceAll(schema, "&", "&amp;")
+	escaped = strings.ReplaceAll(escaped, "<", "&lt;")
+	escaped = strings.ReplaceAll(escaped, ">", "&gt;")
+
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<rpc-reply message-id="%s" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <data xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring">%s</data>
+</rpc-reply>`, msgID, escaped)
+}
+
+var yangSchemas = map[string]string{
+	"vht-system": vhtSystemYang,
+}
+
+const vhtSystemYang = `module vht-system {
+  namespace "urn:vht:params:xml:ns:yang:vht-system";
+  prefix sys;
+
+  container system {
+    leaf hostname { type string; }
+    leaf location { type string; }
+    leaf contact { type string; }
+    container ntp {
+      leaf enabled { type boolean; }
+      list server {
+        key "address";
+        leaf address { type string; }
+        leaf prefer { type boolean; }
+      }
+    }
+    container dns {
+      leaf-list search { type string; }
+      list server {
+        key "address";
+        leaf address { type string; }
+      }
+    }
+    container logging {
+      leaf level { type string; }
+      list remote-server {
+        key "address";
+        leaf address { type string; }
+        leaf port { type uint16; }
+        leaf protocol { type string; }
+      }
+    }
+  }
+
+  container interfaces {
+    list interface {
+      key "name";
+      leaf name { type string; }
+      leaf description { type string; }
+      leaf enabled { type boolean; }
+      leaf mtu { type uint16; }
+      container ipv4 {
+        leaf address { type string; }
+        leaf prefix-length { type uint8; }
+        leaf gateway { type string; }
+      }
+    }
+  }
+}`
 
 // ---------------------------------------------------------------------------
 // XML helpers
