@@ -93,7 +93,7 @@ func isYANGMetadata(line string) bool {
 		"units ", "reference ", "if-feature ", "min-elements ",
 		"max-elements ", "presence ", "config ", "fraction-digits ",
 		"import ", "include ", "belongs-to ", "deviation ",
-		"augment ", "identity ", "extension ", "anyxml ", "anydata ",
+		"identity ", "extension ", "anyxml ", "anydata ",
 		"rpc ", "notification ", "action ", "input ", "output ",
 	} {
 		if strings.HasPrefix(line, kw) {
@@ -183,9 +183,13 @@ func parseGroupingBody(text string, groupings map[string]*schemaNode) *schemaNod
 			}
 			continue
 		}
-		// Resolve `uses` within the grouping body
+		// Resolve `uses` within the grouping body.
+		// Strip module prefix if present: "uses smf:vsmf-grp" → look up "vsmf-grp".
 		if strings.HasPrefix(line, "uses ") {
 			gName := yangNodeName(line, "uses ")
+			if colon := strings.LastIndex(gName, ":"); colon >= 0 {
+				gName = gName[colon+1:]
+			}
 			if g, ok := groupings[gName]; ok {
 				mergeSchema(stack[len(stack)-1], g)
 			}
@@ -260,12 +264,45 @@ func buildSchemaTree(lines []string, groupings map[string]*schemaNode, ns string
 			continue
 		}
 
-		// uses groupingName — expand inline
+		// uses groupingName — expand inline.
+		// Strip module prefix: "uses smf:vsmf-grp" → look up "vsmf-grp".
 		if strings.HasPrefix(line, "uses ") {
 			name := yangNodeName(line, "uses ")
+			if colon := strings.LastIndex(name, ":"); colon >= 0 {
+				name = name[colon+1:]
+			}
 			if g, ok := groupings[name]; ok {
 				parent := stack[len(stack)-1]
 				mergeSchema(parent, g)
+			}
+			continue
+		}
+
+		// augment "/some:path/other:child" { — navigate to target node and
+		// build the augmented content into it.  Strip module prefixes from
+		// each path segment so we can match against the bare node names we
+		// already have in the schema tree.
+		if strings.HasPrefix(line, "augment ") {
+			rawPath := yangNodeName(line, "augment ")
+			rawPath = strings.Trim(rawPath, `"'`)
+			segments := strings.Split(rawPath, "/")
+			target := root
+			for _, seg := range segments {
+				if seg == "" {
+					continue
+				}
+				if colon := strings.LastIndex(seg, ":"); colon >= 0 {
+					seg = seg[colon+1:]
+				}
+				child, ok := target.children[seg]
+				if !ok {
+					child = newSchemaNode()
+					target.children[seg] = child
+				}
+				target = child
+			}
+			if strings.HasSuffix(line, "{") {
+				stack = append(stack, target)
 			}
 			continue
 		}

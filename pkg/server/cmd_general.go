@@ -312,24 +312,28 @@ func (s *session) loadSchema() {
 
 	// 1. Try loading YANG modules via get-schema (RFC 6022)
 	modules := s.nc.ExtractModules()
+	slog.Info("schema: discovered YANG modules from capabilities", "count", len(modules), "modules", modules)
+
 	for _, mod := range modules {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		reply, err := s.nc.GetSchema(ctx, mod)
 		cancel()
 		if err != nil {
+			slog.Warn("schema: get-schema failed", "module", mod, "error", err)
 			continue
 		}
-		// Extract YANG text from rpc-reply <data>...</data>
 		yangText := extractSchemaText(reply)
 		if yangText == "" {
+			slog.Warn("schema: empty YANG text", "module", mod)
 			continue
 		}
-		// Find namespace from capabilities
 		ns := findNamespace(s.nc.Capabilities, mod)
 		parsed := parseSchemaFromYANG(yangText, ns)
 		mergeSchema(s.schema, parsed)
-		slog.Info("schema loaded from YANG", "module", mod, "elements", parsed.childNames())
+		slog.Info("schema: YANG loaded", "module", mod, "top_elements", parsed.childNames())
 	}
+
+	slog.Info("schema: YANG phase complete", "yang_top_elements", s.schema.childNames())
 
 	// 2. Merge with running config to capture runtime-only nodes.
 	//
@@ -346,22 +350,29 @@ func (s *session) loadSchema() {
 	reply, err := s.nc.GetConfig(ctx, "running", "")
 	if err == nil {
 		configSchema := parseSchemaFromXML(reply)
+		slog.Info("schema: XML running-config top_elements", "elements", configSchema.childNames())
 		if len(s.schema.children) == 0 {
 			// No YANG available — use XML as the sole schema source.
+			slog.Warn("schema: no YANG loaded, falling back to XML-only schema (tab completion may show wrong structure for ConfD-omitted intermediate containers)")
 			mergeSchema(s.schema, configSchema)
 		} else {
 			// YANG is loaded — only add top-level containers not already known.
+			var added, skipped []string
 			for name, xmlNode := range configSchema.children {
 				if _, exists := s.schema.children[name]; !exists {
 					s.schema.children[name] = xmlNode
+					added = append(added, name)
+				} else {
+					skipped = append(skipped, name)
 				}
 			}
+			slog.Info("schema: XML merge complete", "added_from_xml", added, "kept_from_yang", skipped)
 		}
+	} else {
+		slog.Warn("schema: get-config failed, using YANG-only schema", "error", err)
 	}
 
-	if len(s.schema.children) > 0 {
-		slog.Info("schema ready", "top_elements", s.schema.childNames())
-	}
+	slog.Info("schema ready", "top_elements", s.schema.childNames())
 }
 
 // extractSchemaText extracts YANG text from get-schema rpc-reply
