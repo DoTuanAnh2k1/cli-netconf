@@ -12,6 +12,7 @@ type Config struct {
 	NetconfUser    string
 	NetconfPass    string
 	NetconfTimeout time.Duration
+	YangDir        string // directory containing .yang files to load as local schema fallback
 }
 
 func Load() *Config {
@@ -22,6 +23,7 @@ func Load() *Config {
 		NetconfUser:    envOr("NETCONF_USERNAME", "admin"),
 		NetconfPass:    envOr("NETCONF_PASSWORD", "admin"),
 		NetconfTimeout: parseDuration(os.Getenv("NETCONF_TIMEOUT"), 30*time.Second),
+		YangDir:        envOr("YANG_DIR", "./yang"),
 	}
 }
 

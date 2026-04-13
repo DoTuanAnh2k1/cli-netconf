@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -307,8 +309,48 @@ func (s *session) cmdDisconnect() {
 	s.writef("Disconnected from %s.\n", name)
 }
 
+// loadSchemaFromDir loads all .yang files from the configured yang_dir and
+// merges them into the schema. This provides correct deep structure for modules
+// that the NE doesn't advertise via get-schema (e.g. proprietary ConfD modules).
+func (s *session) loadSchemaFromDir() {
+	dir := s.cfg.YangDir
+	if dir == "" {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("schema: cannot read yang_dir", "dir", dir, "error", err)
+		}
+		return
+	}
+	loaded := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yang") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("schema: cannot read yang file", "file", path, "error", err)
+			continue
+		}
+		parsed := parseSchemaFromYANG(string(data), "")
+		mergeSchema(s.schema, parsed)
+		slog.Info("schema: loaded from local file", "file", e.Name(), "top_elements", parsed.childNames())
+		loaded++
+	}
+	if loaded > 0 {
+		slog.Info("schema: local YANG files loaded", "count", loaded, "yang_dir", dir)
+	}
+}
+
 func (s *session) loadSchema() {
 	s.schema = newSchemaNode()
+
+	// 0. Load local .yang files first — gives correct structure for modules
+	//    the NE doesn't expose via get-schema (e.g. proprietary ConfD modules).
+	s.loadSchemaFromDir()
 
 	// 1. Try loading YANG modules via get-schema (RFC 6022)
 	modules := s.nc.ExtractModules()
