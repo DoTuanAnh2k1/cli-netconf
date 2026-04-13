@@ -92,7 +92,9 @@ Không có filename sẽ output ra terminal.
 
 ```
 cli-netconf/
-├── main.go                           # Entry point, graceful shutdown
+├── cmd/
+│   ├── netconf/main.go               # SSH server + mgt-service auth (production)
+│   └── direct/main.go                # Kết nối thẳng ConfD, bỏ qua mgt-service (debug)
 ├── pkg/
 │   ├── config/config.go              # Cấu hình từ env vars
 │   ├── api/client.go                 # HTTP client cho mgt-service API
@@ -100,18 +102,19 @@ cli-netconf/
 │   └── server/
 │       ├── server.go                 # SSH server, graceful shutdown
 │       ├── session.go                # Interactive shell, session lifecycle
+│       ├── direct.go                 # RunDirect — chạy session trực tiếp trên stdio
 │       ├── cmd_general.go            # show, connect, help, exit, loadSchema
 │       ├── cmd_netconf.go            # set, unset, commit, dump, lock, rpc
 │       ├── completer.go              # Tab completion, YANG parser, schema tree
 │       └── formatter.go              # XML→text, text→XML, dump formats
 ├── test/
-│   ├── yang/ne-system.yang            # YANG model mẫu
+│   ├── yang/ne-system.yang           # YANG model mẫu
 │   ├── mock-netconf/main.go          # Mock NETCONF server (get-schema support)
-│   ├── mock-mgt/main.go             # Mock mgt-service API
+│   ├── mock-mgt/main.go              # Mock mgt-service API
 │   ├── e2e_test.go                   # 28 tests (all-in-one)
 │   └── run.sh                        # Script chạy mock servers
 ├── deploy/k8s.yaml                   # K8s Deployment + Service
-├── Dockerfile                        # Multi-stage build (~11MB)
+├── Dockerfile                        # Multi-stage build (private registry)
 ├── Makefile
 ├── mgt-service.yaml                  # OpenAPI spec của mgt-service
 └── go.mod
@@ -122,10 +125,14 @@ cli-netconf/
 ### Build
 
 ```bash
-make build
+# SSH server (production)
+go build -o bin/cli-netconf ./cmd/netconf
+
+# Direct mode (debug)
+go build -o bin/cli-direct ./cmd/direct
 ```
 
-### Cấu hình
+### Cấu hình (`cmd/netconf`)
 
 | Biến | Mặc định | Mô tả |
 |---|---|---|
@@ -139,12 +146,24 @@ make build
 ### Chạy local
 
 ```bash
+# Với mock servers
 ./test/run.sh
-# Hoặc
+
+# Hoặc manual
 MGT_SERVICE_URL=http://127.0.0.1:3000 ./bin/cli-netconf
 ```
 
-### Kết nối
+### Direct mode — kết nối thẳng ConfD
+
+Chỉnh địa chỉ ConfD trong `cmd/direct/main.go` rồi chạy:
+
+```bash
+go run ./cmd/direct
+```
+
+Bỏ qua hoàn toàn SSH server và mgt-service, kết nối thẳng vào ConfD NETCONF và vào CLI ngay.
+
+### Kết nối (SSH server mode)
 
 ```bash
 ssh admin@127.0.0.1 -p 2222
@@ -247,7 +266,7 @@ kubectl create secret generic cli-netconf-secret \
   --from-literal=netconf-password=<password>
 
 # Deploy
-make docker-build
+docker build -t cli-netconf .
 kubectl apply -f deploy/k8s.yaml
 ```
 
@@ -255,7 +274,7 @@ kubectl apply -f deploy/k8s.yaml
 
 ```bash
 # Build + start mock servers
-make build
+go build -o bin/cli-netconf ./cmd/netconf
 go build -o bin/mock-mgt ./test/mock-mgt
 go build -o bin/mock-netconf ./test/mock-netconf
 ./bin/mock-mgt & ./bin/mock-netconf &
@@ -296,26 +315,3 @@ go test -v -timeout 300s ./test/
 | 25 | Stress500Configs | Set 500 interfaces (127KB) |
 | 26 | Stress1000Configs | Set 1000 interfaces (253KB) |
 | 27 | MultiSession | 5 SSH sessions đồng thời |
-
-## Tổng hợp tất cả tính năng đã phát triển
-
-1. **SSH server** với password auth qua mgt-service REST API (JWT)
-2. **Auto NE selection** khi login — hiển thị danh sách, chọn bằng số hoặc tên, validate input
-3. **NETCONF client** thuần Go — SSH subsystem, hello exchange, RPC send/receive
-4. **show running-config / candidate-config** với path filter + full path header
-5. **Text output format** — indent, list key display, không raw XML
-6. **set** — 3 mode: inline path+value, paste XML, paste text config (auto-detect)
-7. **unset** — xoá config node via NETCONF operation="delete"
-8. **commit / validate / discard** — candidate datastore workflow
-9. **lock / unlock** — datastore locking
-10. **dump text / xml** — export config ra file hoặc terminal
-11. **Tab completion** — commands, sub-commands, config paths (từ YANG + running config)
-12. **YANG schema loading** — get-schema (RFC 6022) + merge running config
-13. **Graceful shutdown** — SIGINT/SIGTERM → đóng active sessions → thoát sạch
-14. **Multi-session** — goroutine per session, test 5 concurrent OK
-15. **Stress tested** — 1000 configs (253KB), show 230KB output, không crash/treo
-16. **Optimized NETCONF read** — 64KB buffer, tail-only delimiter search
-17. **Mock servers** — mgt-service + NETCONF/ConfD với get-schema support
-18. **28 automated tests** — e2e, tab completion, stress, multi-session
-19. **K8s deployment** — Dockerfile (~11MB), k8s.yaml, secrets
-20. **Module** — `github.com/DoTuanAnh2k1/cli-netconf`, Go 1.25

@@ -153,7 +153,7 @@ func (s *session) readMultiline() string {
 }
 
 func (s *session) saveHistory(cmd string, elapsed time.Duration) {
-	if s.currentNE == nil {
+	if s.currentNE == nil || s.api == nil {
 		return
 	}
 	go s.api.SaveHistory(s.token, &api.HistorySaveRequest{

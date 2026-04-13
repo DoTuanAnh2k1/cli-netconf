@@ -1,12 +1,39 @@
-FROM golang:1.24-alpine AS builder
-WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o cli-netconf .
+# ── Build stage ───────────────────────────────────────────────────────────────
+FROM 172.20.1.22/5gcore/redhat8-golang:1.26.0 AS builder
 
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates
-COPY --from=builder /app/cli-netconf /usr/local/bin/
+RUN mkdir -p /build
+WORKDIR /build
+
+ARG APP_GOPROXY='http://172.20.1.22:8081/repository/golang-proxy/,direct'
+ENV GOPROXY=$APP_GOPROXY
+ENV GONOSUMDB=*
+ENV GONOSUMCHECK=off
+ENV GOTOOLCHAIN=auto
+
+COPY go.mod go.sum ./
+RUN \
+    --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/go/pkg/mod \
+    go mod download
+
+COPY . .
+RUN \
+    --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w" -trimpath -o /tmp/app ./cmd/netconf
+
+# ── Final stage ───────────────────────────────────────────────────────────────
+FROM 172.20.1.22/5gcore/redhat8-base:v1.0
+
+RUN mkdir -p /app
+WORKDIR /app
+
+COPY --from=builder /tmp/app ./app
+
 EXPOSE 2222
-ENTRYPOINT ["cli-netconf"]
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD nc -z 127.0.0.1 ${SSH_PORT:-2222} || exit 1
+
+ENTRYPOINT ["./app"]
