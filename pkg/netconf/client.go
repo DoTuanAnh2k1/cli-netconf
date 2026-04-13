@@ -278,6 +278,20 @@ func (c *Client) Unlock(ctx context.Context, target string) (string, error) {
 	return c.SendRPC(ctx, body)
 }
 
+// CopyConfig replaces an entire datastore with the given inline config XML.
+// Used by the restore command to roll back to a saved snapshot.
+func (c *Client) CopyConfig(ctx context.Context, target, configData string) (string, error) {
+	body := fmt.Sprintf(`  <copy-config>
+    <target><%s/></target>
+    <source>
+      <config>
+%s
+      </config>
+    </source>
+  </copy-config>`, target, configData)
+	return c.SendRPC(ctx, body)
+}
+
 func (c *Client) GetSchema(ctx context.Context, identifier string) (string, error) {
 	body := fmt.Sprintf(`  <get-schema xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring">
     <identifier>%s</identifier>

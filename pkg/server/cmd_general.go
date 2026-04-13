@@ -81,6 +81,8 @@ func (s *session) cmdShow(args []string) {
 		s.cmdShowConfig("running", args[1:])
 	case "candidate-config":
 		s.cmdShowConfig("candidate", args[1:])
+	case "backups":
+		s.cmdShowBackups()
 	default:
 		s.writef("Unknown: show %s\n", args[0])
 	}
@@ -189,6 +191,8 @@ func (s *session) cmdDisconnect() {
 	s.nc = nil
 	s.currentNE = nil
 	s.schema = nil
+	s.backups = nil
+	s.backupSeq = 0
 	s.updatePrompt()
 	s.writef("Disconnected from %s.\n", name)
 }

@@ -104,10 +104,21 @@ func isYANGMetadata(line string) bool {
 }
 
 // collectGroupings does a first pass extracting all `grouping` blocks.
-// Returns a map of grouping-name → schema subtree (children only, no
-// namespace tracking — that happens when the grouping is used).
+// Returns a map of grouping-name → schema subtree.
+//
+// Two-pass approach:
+//  1. Collect raw body text for every grouping (in document order).
+//  2. Parse each body — passing already-parsed groupings so that `uses`
+//     statements inside a grouping body are resolved immediately.
+//     This handles patterns like "grouping outer { uses inner; … }".
 func collectGroupings(lines []string) map[string]*schemaNode {
-	groupings := make(map[string]*schemaNode)
+	// Pass 1: collect body text in document order.
+	type entry struct {
+		name string
+		body string
+	}
+	var entries []entry
+
 	i := 0
 	for i < len(lines) {
 		line := strings.TrimSpace(lines[i])
@@ -116,7 +127,6 @@ func collectGroupings(lines []string) map[string]*schemaNode {
 			continue
 		}
 		name := yangNodeName(line, "grouping ")
-		// Count brace depth: opening `{` on the grouping line itself
 		depth := strings.Count(line, "{") - strings.Count(line, "}")
 		var innerLines []string
 		for i < len(lines) && depth > 0 {
@@ -128,15 +138,22 @@ func collectGroupings(lines []string) map[string]*schemaNode {
 				innerLines = append(innerLines, inner)
 			}
 		}
-		// Parse the body of the grouping as a standalone mini-tree
-		groupings[name] = parseGroupingBody(strings.Join(innerLines, "\n"))
+		entries = append(entries, entry{name, strings.Join(innerLines, "\n")})
+	}
+
+	// Pass 2: parse each body, passing the already-built map so nested
+	// `uses` can be resolved immediately (YANG convention: define before use).
+	groupings := make(map[string]*schemaNode, len(entries))
+	for _, e := range entries {
+		groupings[e.name] = parseGroupingBody(e.body, groupings)
 	}
 	return groupings
 }
 
 // parseGroupingBody builds a schema node from the interior lines of a
-// grouping block (no module wrapper, no namespace tracking).
-func parseGroupingBody(text string) *schemaNode {
+// grouping block. The groupings map is used to resolve any `uses` statements
+// found inside the body (e.g. when one grouping references another).
+func parseGroupingBody(text string, groupings map[string]*schemaNode) *schemaNode {
 	root := newSchemaNode()
 	var stack []*schemaNode
 	stack = append(stack, root)
@@ -163,6 +180,14 @@ func parseGroupingBody(text string) *schemaNode {
 		if isYANGMetadata(line) {
 			if opens > closes {
 				metaDepth += opens - closes
+			}
+			continue
+		}
+		// Resolve `uses` within the grouping body
+		if strings.HasPrefix(line, "uses ") {
+			gName := yangNodeName(line, "uses ")
+			if g, ok := groupings[gName]; ok {
+				mergeSchema(stack[len(stack)-1], g)
 			}
 			continue
 		}
@@ -350,11 +375,11 @@ var commandsBase = []string{
 
 var commandsConnected = []string{
 	"commit", "connect", "discard", "disconnect",
-	"dump", "exit", "help", "lock", "rpc",
+	"dump", "exit", "help", "lock", "restore", "rpc",
 	"set", "show", "unlock", "unset", "validate",
 }
 
-var showSubcommands = []string{"candidate-config", "ne", "running-config"}
+var showSubcommands = []string{"backups", "candidate-config", "ne", "running-config"}
 
 func (s *session) handleComplete(line string, pos int, key rune) (string, int, bool) {
 	if key != '\t' {
@@ -446,6 +471,13 @@ func (s *session) completeArgs(cmd string, args []string, word string) []string 
 
 	case "set", "unset":
 		return s.pathCompletions(args, word, false)
+
+	case "restore":
+		var ids []string
+		for _, b := range s.backups {
+			ids = append(ids, fmt.Sprintf("%d", b.id))
+		}
+		return filterByPrefix(ids, word)
 
 	case "dump":
 		if len(args) == 1 {

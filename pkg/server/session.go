@@ -24,6 +24,14 @@ const (
 	colorReset  = "\033[0m"
 )
 
+// configBackup is a point-in-time snapshot of the running config captured
+// automatically after each successful commit.
+type configBackup struct {
+	id        int
+	timestamp time.Time
+	rawXML    string // full rpc-reply XML from get-config (running)
+}
+
 type session struct {
 	term      *term.Terminal
 	sshConn   io.Writer // raw SSH channel for completion display
@@ -36,7 +44,9 @@ type session struct {
 	neList    []api.NeDataItem
 	currentNE *api.NeDataItem
 	nc        *netconf.Client
-	schema    *schemaNode // YANG schema tree for tab completion
+	schema    *schemaNode   // YANG schema tree for tab completion
+	backups   []configBackup // per-connection config snapshots
+	backupSeq int
 }
 
 func handleSession(s gssh.Session, apiClient *api.Client, cfg *config.Config) {
@@ -128,6 +138,8 @@ func (s *session) run() {
 			s.cmdDump(args)
 		case "rpc":
 			s.cmdRPC()
+		case "restore":
+			s.cmdRestore(args)
 		case "help":
 			s.cmdHelp()
 		case "exit", "quit":

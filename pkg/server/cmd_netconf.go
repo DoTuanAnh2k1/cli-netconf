@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -212,6 +213,7 @@ func (s *session) cmdCommit() {
 
 	if isRPCOK(reply) {
 		s.writef("%sCommit successful.%s\n", colorGreen, colorReset)
+		go s.captureBackup() // save snapshot after every successful commit
 	} else if isRPCError(reply) {
 		s.writef("%sCommit failed: %s%s\n", colorRed, extractRPCErrorMessage(reply), colorReset)
 	} else {
@@ -219,6 +221,116 @@ func (s *session) cmdCommit() {
 	}
 	s.writef("%s(%s)%s\n", colorDim, elapsed.Round(time.Millisecond), colorReset)
 	s.saveHistory("commit", elapsed)
+}
+
+// ---------------------------------------------------------------------------
+// Backup / restore
+// ---------------------------------------------------------------------------
+
+// captureBackup fetches the current running config and stores it as a snapshot.
+// Called in a goroutine after each successful commit.
+func (s *session) captureBackup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	reply, err := s.nc.GetConfig(ctx, "running", "")
+	if err != nil {
+		return
+	}
+	s.backupSeq++
+	s.backups = append(s.backups, configBackup{
+		id:        s.backupSeq,
+		timestamp: time.Now(),
+		rawXML:    reply,
+	})
+}
+
+// cmdShowBackups lists all saved config snapshots for the current connection.
+func (s *session) cmdShowBackups() {
+	if len(s.backups) == 0 {
+		s.writef("No backups available. Snapshots are created automatically after each commit.\n")
+		return
+	}
+	s.writef("%s  ID  Timestamp              Size%s\n", colorBold, colorReset)
+	for _, b := range s.backups {
+		s.writef("  %s%2d%s  %s  %d bytes\n",
+			colorYellow, b.id, colorReset,
+			b.timestamp.Format("2006-01-02 15:04:05"),
+			len(b.rawXML))
+	}
+	s.writef("\nUse '%srestore <id>%s' to roll back to a snapshot.\n", colorCyan, colorReset)
+}
+
+// cmdRestore rolls back running config to a previously saved snapshot.
+func (s *session) cmdRestore(args []string) {
+	if !s.requireConnection() {
+		return
+	}
+	if len(args) == 0 {
+		s.writef("Usage: restore <id>\n")
+		s.writef("  Use 'show backups' to see available snapshots.\n")
+		return
+	}
+
+	id, err := strconv.Atoi(args[0])
+	if err != nil {
+		s.writef("%sInvalid ID '%s' — must be a number.%s\n", colorRed, args[0], colorReset)
+		return
+	}
+
+	var target *configBackup
+	for i := range s.backups {
+		if s.backups[i].id == id {
+			target = &s.backups[i]
+			break
+		}
+	}
+	if target == nil {
+		s.writef("%sBackup #%d not found. Use 'show backups' to list available snapshots.%s\n",
+			colorRed, id, colorReset)
+		return
+	}
+
+	// Extract config content from the saved rpc-reply
+	dataContent := extractRawData(target.rawXML)
+	if dataContent == "" {
+		s.writef("%sError: backup data is empty or malformed.%s\n", colorRed, colorReset)
+		return
+	}
+
+	s.writef("Restore to snapshot #%d (%s)? [y/N] ",
+		id, target.timestamp.Format("2006-01-02 15:04:05"))
+	confirm, err := s.term.ReadLine()
+	if err != nil || strings.ToLower(strings.TrimSpace(confirm)) != "y" {
+		s.writef("Cancelled.\n")
+		return
+	}
+
+	s.writef("Restoring...\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Replace candidate with the snapshot config, then commit
+	reply, err := s.nc.CopyConfig(ctx, "candidate", dataContent)
+	if err != nil {
+		s.writef("%sError: %s%s\n", colorRed, err, colorReset)
+		return
+	}
+	if isRPCError(reply) {
+		s.writef("%sRestore failed: %s%s\n", colorRed, extractRPCErrorMessage(reply), colorReset)
+		return
+	}
+
+	reply, err = s.nc.Commit(ctx)
+	if err != nil {
+		s.writef("%sError: %s%s\n", colorRed, err, colorReset)
+		return
+	}
+	if isRPCOK(reply) {
+		s.writef("%sRestored to snapshot #%d.%s\n", colorGreen, id, colorReset)
+		go s.captureBackup() // record the restore itself as a new snapshot
+	} else if isRPCError(reply) {
+		s.writef("%sCommit failed: %s%s\n", colorRed, extractRPCErrorMessage(reply), colorReset)
+	}
 }
 
 func (s *session) cmdValidate() {

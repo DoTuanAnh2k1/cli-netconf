@@ -227,6 +227,18 @@ func formatXMLResponsePlain(xmlData string, path []string) string {
 	return formatTreePlain(tree, 0)
 }
 
+// extractRawData returns the raw XML content between <data>…</data> in an
+// rpc-reply, without any additional wrapping. Used by restore to feed the
+// snapshot directly into copy-config.
+func extractRawData(xmlData string) string {
+	start := strings.Index(xmlData, "<data>")
+	end := strings.LastIndex(xmlData, "</data>")
+	if start >= 0 && end > start {
+		return strings.TrimSpace(xmlData[start+6 : end])
+	}
+	return ""
+}
+
 // extractDataXML returns clean XML content from rpc-reply (strips wrapper).
 func extractDataXML(xmlData string) string {
 	start := strings.Index(xmlData, "<data>")
