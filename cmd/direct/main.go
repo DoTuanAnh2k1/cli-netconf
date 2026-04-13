@@ -24,9 +24,9 @@ import (
 //	NETCONF_PASS  SSH password         (default: admin, ssh mode only)
 //	NE_NAME       label shown in prompt (default: confd)
 const (
-	defaultHost = "127.0.0.1"
-	defaultPort = 2023
-	defaultMode = "tcp"
+	defaultHost = "171.16.25.131"
+	defaultPort = 2075
+	defaultMode = "ssh"
 	defaultUser = "admin"
 	defaultPass = "admin"
 	defaultName = "confd"
