@@ -13,6 +13,7 @@ import (
 	"github.com/DoTuanAnh2k1/cli-netconf/pkg/api"
 	"github.com/DoTuanAnh2k1/cli-netconf/pkg/netconf"
 	"github.com/DoTuanAnh2k1/cli-netconf/pkg/server"
+	"golang.org/x/term"
 )
 
 // Connection parameters — override via environment variables.
@@ -70,10 +71,22 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "Connected. NETCONF session ID: %s\n", nc.SessionID)
 
+	// Put stdin into raw mode so Tab and other control keys reach the program.
+	// Must be restored before exit to avoid leaving the terminal broken.
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not set raw mode: %v\n", err)
+	} else {
+		defer term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
+		if oldState != nil {
+			term.Restore(int(os.Stdin.Fd()), oldState)
+		}
 		nc.Close()
 		os.Exit(0)
 	}()
