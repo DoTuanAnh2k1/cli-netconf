@@ -231,13 +231,32 @@ func (s *session) loadSchema() {
 		slog.Info("schema loaded from YANG", "module", mod, "elements", parsed.childNames())
 	}
 
-	// 2. Merge with running config to capture any runtime-only nodes
+	// 2. Merge with running config to capture runtime-only nodes.
+	//
+	// When YANG loaded successfully (schema has children), we only add top-level
+	// containers that YANG didn't describe.  This prevents the XML config from
+	// corrupting the YANG-derived deep structure: ConfD may omit intermediate
+	// containers (e.g. "vsmf") from the XML when none of their direct leaves are
+	// explicitly set, which would cause parseSchemaFromXML to place grandchildren
+	// (e.g. "qosConf") one level too high relative to the YANG schema.
+	//
+	// When YANG loading failed entirely, fall back to full XML-based schema.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	reply, err := s.nc.GetConfig(ctx, "running", "")
 	if err == nil {
 		configSchema := parseSchemaFromXML(reply)
-		mergeSchema(s.schema, configSchema)
+		if len(s.schema.children) == 0 {
+			// No YANG available — use XML as the sole schema source.
+			mergeSchema(s.schema, configSchema)
+		} else {
+			// YANG is loaded — only add top-level containers not already known.
+			for name, xmlNode := range configSchema.children {
+				if _, exists := s.schema.children[name]; !exists {
+					s.schema.children[name] = xmlNode
+				}
+			}
+		}
 	}
 
 	if len(s.schema.children) > 0 {
