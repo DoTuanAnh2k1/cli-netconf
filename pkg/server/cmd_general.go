@@ -176,26 +176,58 @@ func (s *session) cmdConnect(args []string) {
 	s.doConnect(idx)
 }
 
+// neConfigKeys returns the keys of the neConfigs map for logging.
+func neConfigKeys(m map[string]*api.CliNeConfig) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // loadNeConfigs fetches per-NE NETCONF connection configs from mgt-service
-// and caches them in s.neConfigs keyed by NE name. Non-critical — falls back
-// to config-file credentials if unavailable.
+// and caches them in s.neConfigs keyed by NE name (trimmed, case-insensitive key).
+// Non-critical — falls back to config-file credentials if unavailable.
 func (s *session) loadNeConfigs() {
 	groups, err := s.api.ListNeConfig(s.token)
 	if err != nil {
 		slog.Info("could not load NE configs from mgt-service, using config-file credentials", "error", err)
 		return
 	}
+
 	m := make(map[string]*api.CliNeConfig, len(groups))
 	for i := range groups {
 		g := &groups[i]
-		// Pick the first NETCONF entry for this NE.
+		neName := strings.TrimSpace(g.NeName)
+		if neName == "" || len(g.ConfigList) == 0 {
+			continue
+		}
+
+		// Prefer NETCONF protocol; if none found, fall back to the first entry.
+		var chosen *api.CliNeConfig
 		for j := range g.ConfigList {
-			if strings.EqualFold(g.ConfigList[j].Protocol, "NETCONF") {
-				cfg := g.ConfigList[j]
-				m[g.NeName] = &cfg
+			if strings.EqualFold(strings.TrimSpace(g.ConfigList[j].Protocol), "NETCONF") {
+				c := g.ConfigList[j]
+				chosen = &c
 				break
 			}
 		}
+		if chosen == nil {
+			c := g.ConfigList[0]
+			chosen = &c
+			slog.Info("NE config: no NETCONF entry, using first entry",
+				"ne_name", neName, "protocol", chosen.Protocol)
+		}
+
+		// Store under lowercase key for case-insensitive lookup.
+		m[strings.ToLower(neName)] = chosen
+		slog.Info("NE config cached",
+			"ne_name", neName,
+			"ip_address", chosen.IPAddress,
+			"port", chosen.Port,
+			"username", chosen.Username,
+			"protocol", chosen.Protocol,
+		)
 	}
 	s.neConfigs = m
 	slog.Info("NE configs loaded", "ne_count", len(m))
@@ -210,7 +242,16 @@ func (s *session) doConnect(idx int) {
 	port := ne.Port
 	user := s.cfg.NetconfUser
 	pass := s.cfg.NetconfPass
-	if cfg, ok := s.neConfigs[ne.Ne]; ok {
+
+	// Lookup is case-insensitive to handle ne_name vs ne field casing differences.
+	if cfg, ok := s.neConfigs[strings.ToLower(strings.TrimSpace(ne.Ne))]; ok {
+		slog.Info("using mgt-service NE config",
+			"ne", ne.Ne,
+			"ip_address", cfg.IPAddress,
+			"port", cfg.Port,
+			"username", cfg.Username,
+			"protocol", cfg.Protocol,
+		)
 		if cfg.IPAddress != "" {
 			host = cfg.IPAddress
 		}
@@ -223,6 +264,13 @@ func (s *session) doConnect(idx int) {
 		if cfg.Password != "" {
 			pass = cfg.Password
 		}
+	} else {
+		slog.Info("no mgt-service NE config found, using fallback",
+			"ne", ne.Ne,
+			"fallback_ip", host,
+			"fallback_port", port,
+			"known_ne_names", neConfigKeys(s.neConfigs),
+		)
 	}
 
 	s.writef("Connecting to %s (%s:%d)...\n", ne.Ne, host, port)
