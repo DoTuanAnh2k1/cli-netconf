@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/api"
 )
 
 func (s *session) cmdSet(args []string) {
@@ -227,21 +229,76 @@ func (s *session) cmdCommit() {
 // Backup / restore
 // ---------------------------------------------------------------------------
 
-// captureBackup fetches the current running config and stores it as a snapshot.
-// Called in a goroutine after each successful commit.
+// captureBackup fetches the current running config, stores it locally, and
+// persists it to the mgt-service. Called in a goroutine after each successful commit.
 func (s *session) captureBackup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
 	reply, err := s.nc.GetConfig(ctx, "running", "")
 	if err != nil {
 		return
 	}
+
 	s.backupSeq++
-	s.backups = append(s.backups, configBackup{
+	b := configBackup{
 		id:        s.backupSeq,
 		timestamp: time.Now(),
 		rawXML:    reply,
-	})
+	}
+
+	// Persist to mgt-service if API is available.
+	if s.api != nil && s.currentNE != nil {
+		configXML := extractRawData(reply)
+		res, err := s.api.SaveBackup(s.token, &api.BackupSaveRequest{
+			NeName:    s.currentNE.Ne,
+			NeIP:      s.currentNE.IP,
+			ConfigXML: configXML,
+		})
+		if err == nil {
+			b.remoteID = res.ID
+		}
+	}
+
+	s.backups = append(s.backups, b)
+}
+
+// loadBackupsFromAPI loads existing backup metadata for the current NE from
+// the mgt-service and prepends them to s.backups so the user can restore
+// snapshots from previous sessions. XML is fetched lazily on restore.
+func (s *session) loadBackupsFromAPI() {
+	if s.api == nil || s.currentNE == nil {
+		return
+	}
+
+	resp, err := s.api.ListBackups(s.token, s.currentNE.Ne)
+	if err != nil {
+		return // silently ignore — backup is a non-critical feature
+	}
+
+	var remote []configBackup
+	for i, item := range resp.Backups {
+		ts, _ := time.Parse(time.RFC3339, item.CreatedAt)
+		remote = append(remote, configBackup{
+			id:        i + 1, // temporary local IDs, will be renumbered below
+			remoteID:  item.ID,
+			timestamp: ts,
+			// rawXML intentionally empty — fetched lazily when restore is requested
+		})
+	}
+
+	if len(remote) == 0 {
+		return
+	}
+
+	// Prepend remote backups (oldest first) before any local ones captured this session.
+	// Renumber all IDs sequentially starting from 1.
+	all := append(remote, s.backups...)
+	for i := range all {
+		all[i].id = i + 1
+	}
+	s.backups = all
+	s.backupSeq = len(all)
 }
 
 // cmdShowBackups lists all saved config snapshots for the current connection.
@@ -250,12 +307,22 @@ func (s *session) cmdShowBackups() {
 		s.writef("No backups available. Snapshots are created automatically after each commit.\n")
 		return
 	}
-	s.writef("%s  ID  Timestamp              Size%s\n", colorBold, colorReset)
+	s.writef("%s  ID  Timestamp              Size       Source%s\n", colorBold, colorReset)
 	for _, b := range s.backups {
-		s.writef("  %s%2d%s  %s  %d bytes\n",
+		source := "local"
+		if b.remoteID != 0 && b.rawXML == "" {
+			source = fmt.Sprintf("%sremote #%d%s", colorDim, b.remoteID, colorReset)
+		} else if b.remoteID != 0 {
+			source = fmt.Sprintf("saved #%d", b.remoteID)
+		}
+		size := "-"
+		if b.rawXML != "" {
+			size = fmt.Sprintf("%d B", len(b.rawXML))
+		}
+		s.writef("  %s%2d%s  %s  %-10s %s\n",
 			colorYellow, b.id, colorReset,
 			b.timestamp.Format("2006-01-02 15:04:05"),
-			len(b.rawXML))
+			size, source)
 	}
 	s.writef("\nUse '%srestore <id>%s' to roll back to a snapshot.\n", colorCyan, colorReset)
 }
@@ -290,8 +357,23 @@ func (s *session) cmdRestore(args []string) {
 		return
 	}
 
-	// Extract config content from the saved rpc-reply
+	// If this is a remote-only backup (lazy), fetch the XML from mgt-service first.
+	if target.rawXML == "" && target.remoteID != 0 {
+		s.writef("Fetching backup from server...\n")
+		detail, err := s.api.GetBackup(s.token, target.remoteID)
+		if err != nil {
+			s.writef("%sError fetching backup: %s%s\n", colorRed, err, colorReset)
+			return
+		}
+		target.rawXML = detail.ConfigXML // store for potential re-use this session
+	}
+
+	// Extract config content from the saved rpc-reply (or raw XML from API).
 	dataContent := extractRawData(target.rawXML)
+	if dataContent == "" {
+		// rawXML may already be the bare config XML (from API, not rpc-reply wrapper).
+		dataContent = strings.TrimSpace(target.rawXML)
+	}
 	if dataContent == "" {
 		s.writef("%sError: backup data is empty or malformed.%s\n", colorRed, colorReset)
 		return

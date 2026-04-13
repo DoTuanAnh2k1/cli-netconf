@@ -58,6 +58,47 @@ type ChangePasswordRequest struct {
 	NewPassword string `json:"new_password"`
 }
 
+// --- Config backup ---
+
+// BackupSaveRequest is sent to POST /aa/config-backup/save.
+type BackupSaveRequest struct {
+	NeName    string `json:"ne_name"`
+	NeIP      string `json:"ne_ip"`
+	ConfigXML string `json:"config_xml"` // raw XML content extracted from get-config reply
+}
+
+// BackupSaveResponse is the response from POST /aa/config-backup/save.
+type BackupSaveResponse struct {
+	Status string `json:"status"`
+	ID     int    `json:"id"` // server-assigned backup ID
+}
+
+// BackupItem is one entry in the list returned by GET /aa/config-backup/list.
+type BackupItem struct {
+	ID        int    `json:"id"`
+	NeName    string `json:"ne_name"`
+	NeIP      string `json:"ne_ip"`
+	CreatedAt string `json:"created_at"` // RFC3339
+	Size      int    `json:"size"`        // byte length of config_xml
+}
+
+// BackupListResponse is the response from GET /aa/config-backup/list.
+type BackupListResponse struct {
+	Status  string       `json:"status"`
+	Backups []BackupItem `json:"backups"`
+}
+
+// BackupDetailResponse is the response from GET /aa/config-backup/{id}.
+// Includes the full config XML so the client can perform a restore.
+type BackupDetailResponse struct {
+	Status    string `json:"status"`
+	ID        int    `json:"id"`
+	NeName    string `json:"ne_name"`
+	NeIP      string `json:"ne_ip"`
+	CreatedAt string `json:"created_at"` // RFC3339
+	ConfigXML string `json:"config_xml"`
+}
+
 // --- Client ---
 
 type Client struct {
@@ -151,6 +192,91 @@ func (c *Client) SaveHistory(token string, req *HistorySaveRequest) error {
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// SaveBackup persists a config snapshot to the mgt-service.
+// Returns the server-assigned backup ID on success.
+func (c *Client) SaveBackup(token string, req *BackupSaveRequest) (*BackupSaveResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequest("POST", c.baseURL+"/aa/config-backup/save", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("save backup: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("save backup failed (%d): %s", resp.StatusCode, string(msg))
+	}
+
+	var result BackupSaveResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode save backup response: %w", err)
+	}
+	return &result, nil
+}
+
+// ListBackups fetches the list of saved snapshots for a given NE name.
+func (c *Client) ListBackups(token, neName string) (*BackupListResponse, error) {
+	httpReq, err := http.NewRequest("GET", c.baseURL+"/aa/config-backup/list?ne_name="+neName, nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("list backups: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound {
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list backups failed (%d): %s", resp.StatusCode, string(msg))
+	}
+
+	var result BackupListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode backup list: %w", err)
+	}
+	return &result, nil
+}
+
+// GetBackup fetches the full detail (including config XML) of a backup by its server ID.
+func (c *Client) GetBackup(token string, id int) (*BackupDetailResponse, error) {
+	httpReq, err := http.NewRequest("GET", fmt.Sprintf("%s/aa/config-backup/%d", c.baseURL, id), nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("get backup: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get backup failed (%d): %s", resp.StatusCode, string(msg))
+	}
+
+	var result BackupDetailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode backup detail: %w", err)
+	}
+	return &result, nil
 }
 
 func (c *Client) ChangePassword(token string, req *ChangePasswordRequest) error {

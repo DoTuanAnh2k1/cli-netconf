@@ -189,6 +189,7 @@ func (s *session) doConnect(idx int) {
 	s.updatePrompt()
 	s.writef("%sConnected.%s NETCONF session ID: %s\n", colorGreen, colorReset, nc.SessionID)
 	s.loadSchema()
+	go s.loadBackupsFromAPI()
 }
 
 func (s *session) cmdDisconnect() {

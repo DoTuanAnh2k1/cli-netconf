@@ -10,12 +10,13 @@ User --SSH--> [CLI Pod :2222]
                 |-- Auth -----> [mgt-service :3000]  (REST API, JWT)
                 |-- List NE --> [mgt-service :3000]
                 |-- History --> [mgt-service :3000]
+                |-- Backup ---> [mgt-service :3000]  (lưu/load config snapshots)
                 |
                 |-- NETCONF/SSH --> [NE Pod :830]  (ConfD, YANG model)
 ```
 
 - **CLI Pod**: SSH server, xác thực user qua mgt-service, cung cấp interactive shell
-- **mgt-service**: REST API quản lý user, phân quyền, danh sách NE
+- **mgt-service**: REST API quản lý user, phân quyền, danh sách NE, lưu trữ config backup
 - **NE Pod**: Network Element chạy ConfD với NETCONF subsystem
 
 ## Tính năng
@@ -26,6 +27,16 @@ User --SSH--> [CLI Pod :2222]
 - Khi login tự động hiển thị danh sách NE và yêu cầu chọn (bằng số hoặc tên)
 - Nhập sai tên NE sẽ báo lỗi và yêu cầu nhập lại
 - Hỗ trợ multi-session: nhiều user SSH đồng thời, mỗi session độc lập
+
+### Điều hướng session
+
+| Tình huống | Ctrl+C | `exit` |
+|---|---|---|
+| Đang gõ lệnh (kết nối NE) | Huỷ dòng đang gõ, hiện lại prompt | Ngắt kết nối → quay về chọn NE |
+| Màn hình chọn NE | Huỷ dòng đang gõ, hiện lại prompt | Thoát khỏi SSH hoàn toàn |
+| Đang không kết nối NE | Huỷ dòng đang gõ | Thoát khỏi SSH hoàn toàn |
+
+Lệnh `disconnect` cũng ngắt kết nối NE và quay về màn hình chọn NE.
 
 ### Xem cấu hình
 - `show running-config` — xem toàn bộ config đang chạy
@@ -107,6 +118,35 @@ system
 
 Dòng `<MORE>` tự động xoá khi tiếp tục, không để lại dấu vết trong output.
 
+### Backup & Restore config
+
+Mỗi lần `commit` thành công, CLI tự động chụp lại running config và lưu lên mgt-service. Khi connect lại NE, danh sách backup cũ sẽ được tải về tự động.
+
+| Lệnh | Mô tả |
+|---|---|
+| `show backups` | Liệt kê tất cả snapshot với ID, thời gian, kích thước |
+| `restore <id>` | Roll back về snapshot đó (copy-config → commit) |
+
+```
+admin[ne-amf-01]> show backups
+  ID  Timestamp              Size       Source
+   1  2026-04-13 09:00:00   -          remote #7
+   2  2026-04-13 10:15:32   48230 B    saved #8
+   3  2026-04-13 11:02:11   49105 B    local
+
+admin[ne-amf-01]> restore 2
+Restore to snapshot #2 (2026-04-13 10:15:32)? [y/N] y
+Restoring...
+Restored to snapshot #2.
+```
+
+**Lưu ý:**
+- Backup lưu trên mgt-service → tồn tại qua nhiều phiên làm việc
+- Nếu mgt-service không khả dụng, backup vẫn lưu tạm trong session hiện tại (không bị cản trở commit)
+- Backup từ session cũ hiện dưới dạng `remote #<id>`, XML tải về lazily chỉ khi cần restore
+- `restore` bản thân cũng tạo một snapshot mới (để có thể undo nếu nhầm)
+- Tab completion cho ID: `restore <TAB>` gợi ý các ID đang có
+
 ### Graceful Shutdown
 - Server nhận SIGINT/SIGTERM → đóng tất cả active SSH sessions → thoát sạch
 - Timeout 10s cho shutdown, không bị treo nếu có user đang kết nối
@@ -130,12 +170,12 @@ cli-netconf/
 │   ├── netconf/client.go             # NETCONF client — SSH (RFC 6241) và TCP
 │   └── server/
 │       ├── server.go                 # SSH server, graceful shutdown
-│       ├── session.go                # Interactive shell, session lifecycle
+│       ├── session.go                # Interactive shell, session lifecycle, configBackup struct
 │       ├── direct.go                 # RunDirect — chạy session trực tiếp trên stdio
-│       ├── cmd_general.go            # show, connect, help, exit, loadSchema
-│       ├── cmd_netconf.go            # set, unset, commit, dump, lock, rpc
+│       ├── cmd_general.go            # show, connect, disconnect, help, exit, loadSchema
+│       ├── cmd_netconf.go            # set, unset, commit, dump, lock, rpc, backup/restore
 │       ├── completer.go              # Tab completion, YANG parser, schema tree
-│       └── formatter.go              # XML→text, text→XML, dump formats
+│       └── formatter.go              # XML→text, text→XML, dump formats, textConfigToXML
 ├── test/
 │   ├── yang/ne-system.yang           # YANG model mẫu
 │   ├── mock-netconf/main.go          # Mock NETCONF server (SSH :8830 + TCP :2023)
@@ -231,9 +271,11 @@ ssh admin@127.0.0.1 -p 2222
   1  ne-amf-01   HCM   10.0.1.10  830  5gc-hcm    AMF Node
   2  ne-smf-01   HNI   10.0.1.20  830  5gc-hni    SMF Node
 
-Select NE [1-2 or name]: ne-amf-01
+Select NE [1-2 or name] (exit to quit): ne-amf-01
 Connected. NETCONF session ID: 42
 ```
+
+Sau khi kết nối xong, gõ `exit` để quay về màn hình chọn NE, gõ `exit` lần nữa để thoát SSH.
 
 ### Xem config
 
@@ -292,6 +334,23 @@ Saved to /tmp/config.txt (259351 bytes)
 
 admin[ne-amf-01]> dump xml /tmp/config.xml
 Saved to /tmp/config.xml (289471 bytes)
+```
+
+### Backup & Restore
+
+```
+# Xem danh sách backup (tự động load từ mgt-service khi connect)
+admin[ne-amf-01]> show backups
+  ID  Timestamp              Size       Source
+   1  2026-04-13 09:00:00   -          remote #7
+   2  2026-04-13 10:15:32   48230 B    saved #8
+   3  2026-04-13 11:02:11   49105 B    local
+
+# Roll back về snapshot #2
+admin[ne-amf-01]> restore 2
+Restore to snapshot #2 (2026-04-13 10:15:32)? [y/N] y
+Restoring...
+Restored to snapshot #2.
 ```
 
 ### Tab completion & command history

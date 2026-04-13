@@ -27,9 +27,10 @@ const (
 // configBackup is a point-in-time snapshot of the running config captured
 // automatically after each successful commit.
 type configBackup struct {
-	id        int
+	id        int       // local sequential ID shown to the user
+	remoteID  int       // server-assigned ID from mgt-service (0 = not yet persisted)
 	timestamp time.Time
-	rawXML    string // full rpc-reply XML from get-config (running)
+	rawXML    string // full rpc-reply XML from get-config; empty for remote-only entries (lazy-loaded on restore)
 }
 
 type session struct {
