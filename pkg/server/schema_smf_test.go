@@ -30,10 +30,17 @@ import (
 //
 // qosConf must NOT appear as a direct child of nsmfPduSession.
 func TestSMFSchemaTabCompletion(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+	// Each RPC uses a generous per-call timeout so it can never expire on a
+	// healthy loopback connection.  Using context.Background()-derived timeouts
+	// that are too short caused goroutine races when a previous readMessage
+	// goroutine kept reading from stdout after its context fired, competing
+	// with the next goroutine.  The outer -timeout flag guards against hangs.
+	rpcCtx := context.Background()
 
-	nc, err := netconf.Dial(ctx, "127.0.0.1", 8830, "admin", "admin")
+	dialCtx, dialCancel := context.WithTimeout(rpcCtx, 10*time.Second)
+	defer dialCancel()
+
+	nc, err := netconf.Dial(dialCtx, "127.0.0.1", 8830, "admin", "admin")
 	if err != nil {
 		t.Skipf("mock-netconf not running: %v", err)
 	}
@@ -46,10 +53,9 @@ func TestSMFSchemaTabCompletion(t *testing.T) {
 	t.Logf("modules from capabilities: %v", modules)
 
 	for _, mod := range modules {
-		ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-		reply, err := nc.GetSchema(ctx2, mod)
-		cancel2()
+		reply, err := nc.GetSchema(rpcCtx, mod)
 		if err != nil {
+			t.Logf("GetSchema %s: %v", mod, err)
 			continue
 		}
 		yangText := extractSchemaText(reply)
@@ -62,9 +68,7 @@ func TestSMFSchemaTabCompletion(t *testing.T) {
 		t.Logf("YANG loaded: module=%s top-elements=%v", mod, parsed.childNames())
 	}
 
-	ctx3, cancel3 := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel3()
-	reply, err := nc.GetConfig(ctx3, "running", "")
+	reply, err := nc.GetConfig(rpcCtx, "running", "")
 	if err == nil {
 		configSchema := parseSchemaFromXML(reply)
 		// Apply the fix: only add top-level containers YANG doesn't know about
