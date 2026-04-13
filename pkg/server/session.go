@@ -44,6 +44,7 @@ type session struct {
 	username  string
 	promptStr string
 	neList    []api.NeDataItem
+	neConfigs map[string]*api.CliNeConfig // ne_name → NETCONF config (from /aa/list/ne/config)
 	currentNE *api.NeDataItem
 	nc        *netconf.Client
 	schema    *schemaNode   // YANG schema tree for tab completion

@@ -59,6 +59,29 @@ type ChangePasswordRequest struct {
 	NewPassword string `json:"new_password"`
 }
 
+// --- NE connection config ---
+
+// CliNeConfig holds connection parameters for one protocol entry of an NE.
+type CliNeConfig struct {
+	ID          int    `json:"id"`
+	NeID        int    `json:"ne_id"`
+	IPAddress   string `json:"ip_address"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	Protocol    string `json:"protocol"`
+	Description string `json:"description"`
+}
+
+// NeConfigGroupEntry groups all connection configs for one NE.
+// Returned by GET /aa/list/ne/config.
+type NeConfigGroupEntry struct {
+	NeName     string        `json:"ne_name"`
+	NeIP       string        `json:"ne_ip"`
+	SiteName   string        `json:"site_name"`
+	ConfigList []CliNeConfig `json:"config_list"`
+}
+
 // --- Config backup ---
 
 // BackupSaveRequest is sent to POST /aa/config-backup/save.
@@ -364,6 +387,42 @@ func (c *Client) GetBackup(token string, id int) (*BackupDetailResponse, error) 
 	}
 	slog.Info("mgt-svc get backup ok", "id", result.ID, "ne_name", result.NeName, "xml_len", len(result.ConfigXML))
 	return &result, nil
+}
+
+// ListNeConfig fetches all NE connection configs for the logged-in user,
+// grouped by NE. Use this to get per-NE NETCONF IP, port, username and password.
+func (c *Client) ListNeConfig(token string) ([]NeConfigGroupEntry, error) {
+	url := c.baseURL + "/aa/list/ne/config"
+	slog.Info("mgt-svc request", "method", "GET", "url", url, "token_preview", tokenPreview(token))
+
+	httpReq, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", token)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		slog.Error("mgt-svc request failed", "url", url, "error", err)
+		return nil, fmt.Errorf("list NE config: %w", err)
+	}
+	defer resp.Body.Close()
+
+	slog.Info("mgt-svc response", "url", url, "status", resp.StatusCode)
+
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		slog.Warn("mgt-svc list NE config error", "status", resp.StatusCode, "body", string(msg))
+		return nil, fmt.Errorf("list NE config failed (%d): %s", resp.StatusCode, string(msg))
+	}
+
+	var result []NeConfigGroupEntry
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		slog.Error("mgt-svc decode error", "url", url, "error", err)
+		return nil, fmt.Errorf("decode NE config list: %w", err)
+	}
+	slog.Info("mgt-svc list NE config ok", "ne_count", len(result))
+	return result, nil
 }
 
 func (c *Client) ChangePassword(token string, req *ChangePasswordRequest) error {

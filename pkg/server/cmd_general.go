@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/api"
 	"github.com/DoTuanAnh2k1/cli-netconf/pkg/netconf"
 )
 
@@ -28,6 +29,10 @@ func (s *session) autoSelectNE() bool {
 		s.writef("No network elements available.\n")
 		return false
 	}
+
+	// Load per-NE NETCONF connection configs (IP, port, username, password).
+	// Non-critical: fall back to config-file credentials if unavailable.
+	s.loadNeConfigs()
 
 	s.displayNETable()
 	s.writef("\n")
@@ -171,14 +176,61 @@ func (s *session) cmdConnect(args []string) {
 	s.doConnect(idx)
 }
 
+// loadNeConfigs fetches per-NE NETCONF connection configs from mgt-service
+// and caches them in s.neConfigs keyed by NE name. Non-critical — falls back
+// to config-file credentials if unavailable.
+func (s *session) loadNeConfigs() {
+	groups, err := s.api.ListNeConfig(s.token)
+	if err != nil {
+		slog.Info("could not load NE configs from mgt-service, using config-file credentials", "error", err)
+		return
+	}
+	m := make(map[string]*api.CliNeConfig, len(groups))
+	for i := range groups {
+		g := &groups[i]
+		// Pick the first NETCONF entry for this NE.
+		for j := range g.ConfigList {
+			if strings.EqualFold(g.ConfigList[j].Protocol, "NETCONF") {
+				cfg := g.ConfigList[j]
+				m[g.NeName] = &cfg
+				break
+			}
+		}
+	}
+	s.neConfigs = m
+	slog.Info("NE configs loaded", "ne_count", len(m))
+}
+
 func (s *session) doConnect(idx int) {
 	ne := s.neList[idx-1]
-	s.writef("Connecting to %s (%s:%d)...\n", ne.Ne, ne.IP, ne.Port)
+
+	// Resolve connection parameters: prefer per-NE config from mgt-service,
+	// fall back to the NE list IP/port and config-file credentials.
+	host := ne.IP
+	port := ne.Port
+	user := s.cfg.NetconfUser
+	pass := s.cfg.NetconfPass
+	if cfg, ok := s.neConfigs[ne.Ne]; ok {
+		if cfg.IPAddress != "" {
+			host = cfg.IPAddress
+		}
+		if cfg.Port != 0 {
+			port = cfg.Port
+		}
+		if cfg.Username != "" {
+			user = cfg.Username
+		}
+		if cfg.Password != "" {
+			pass = cfg.Password
+		}
+	}
+
+	s.writef("Connecting to %s (%s:%d)...\n", ne.Ne, host, port)
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.NetconfTimeout)
 	defer cancel()
 
-	nc, err := netconf.Dial(ctx, ne.IP, ne.Port, s.cfg.NetconfUser, s.cfg.NetconfPass)
+	nc, err := netconf.Dial(ctx, host, port, user, pass)
 	if err != nil {
 		s.writef("%sConnection failed: %s%s\n", colorRed, err, colorReset)
 		return
