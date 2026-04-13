@@ -61,41 +61,186 @@ func (n *schemaNode) lookup(path []string) *schemaNode {
 	return node
 }
 
-// parseSchemaFromYANG parses a simplified YANG module text and builds a schema tree.
-// Handles: container, list, leaf, leaf-list with nesting.
+// parseSchemaFromYANG parses a YANG module text and builds a schema tree.
+// Handles: container, list, leaf, leaf-list, grouping, uses.
+// Two-pass: first collect all grouping definitions, then build the tree
+// expanding `uses` statements inline.
 func parseSchemaFromYANG(yangText string, ns string) *schemaNode {
-	root := newSchemaNode()
 	lines := strings.Split(yangText, "\n")
+	groupings := collectGroupings(lines)
+	return buildSchemaTree(lines, groupings, ns)
+}
 
+// yangNodeName extracts the node name from a YANG statement line.
+// e.g. "container ntp {" with prefix "container " → "ntp"
+func yangNodeName(line, prefix string) string {
+	s := line[len(prefix):]
+	end := strings.IndexAny(s, " {;")
+	if end >= 0 {
+		s = s[:end]
+	}
+	return strings.TrimSpace(s)
+}
+
+// isYANGMetadata returns true for YANG keywords that carry no schema-tree
+// meaning (they do not create navigable nodes).
+func isYANGMetadata(line string) bool {
+	for _, kw := range []string{
+		"namespace ", "prefix ", "key ", "type ", "revision ",
+		"organization ", "description", "contact ", "default ",
+		"range ", "length ", "ordered-by ", "nullable ", "enum ",
+		"format ", "when ", "must ", "pattern ", "status ",
+		"units ", "reference ", "if-feature ", "min-elements ",
+		"max-elements ", "presence ", "config ", "fraction-digits ",
+		"import ", "include ", "belongs-to ", "deviation ",
+		"augment ", "identity ", "extension ", "anyxml ", "anydata ",
+		"rpc ", "notification ", "action ", "input ", "output ",
+	} {
+		if strings.HasPrefix(line, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// collectGroupings does a first pass extracting all `grouping` blocks.
+// Returns a map of grouping-name → schema subtree (children only, no
+// namespace tracking — that happens when the grouping is used).
+func collectGroupings(lines []string) map[string]*schemaNode {
+	groupings := make(map[string]*schemaNode)
+	i := 0
+	for i < len(lines) {
+		line := strings.TrimSpace(lines[i])
+		i++
+		if !strings.HasPrefix(line, "grouping ") {
+			continue
+		}
+		name := yangNodeName(line, "grouping ")
+		// Count brace depth: opening `{` on the grouping line itself
+		depth := strings.Count(line, "{") - strings.Count(line, "}")
+		var innerLines []string
+		for i < len(lines) && depth > 0 {
+			inner := lines[i]
+			i++
+			trimmed := strings.TrimSpace(inner)
+			depth += strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
+			if depth > 0 {
+				innerLines = append(innerLines, inner)
+			}
+		}
+		// Parse the body of the grouping as a standalone mini-tree
+		groupings[name] = parseGroupingBody(strings.Join(innerLines, "\n"))
+	}
+	return groupings
+}
+
+// parseGroupingBody builds a schema node from the interior lines of a
+// grouping block (no module wrapper, no namespace tracking).
+func parseGroupingBody(text string) *schemaNode {
+	root := newSchemaNode()
 	var stack []*schemaNode
 	stack = append(stack, root)
+	metaDepth := 0
+
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		opens := strings.Count(line, "{")
+		closes := strings.Count(line, "}")
+
+		if metaDepth > 0 {
+			metaDepth += opens - closes
+			continue
+		}
+		if line == "}" {
+			if len(stack) > 1 {
+				stack = stack[:len(stack)-1]
+			}
+			continue
+		}
+		if isYANGMetadata(line) {
+			if opens > closes {
+				metaDepth += opens - closes
+			}
+			continue
+		}
+		for _, kw := range []string{"container ", "list ", "leaf-list ", "leaf "} {
+			if strings.HasPrefix(line, kw) {
+				name := yangNodeName(line, kw)
+				parent := stack[len(stack)-1]
+				child, exists := parent.children[name]
+				if !exists {
+					child = newSchemaNode()
+					parent.children[name] = child
+				}
+				if strings.HasSuffix(line, "{") {
+					stack = append(stack, child)
+				}
+				break
+			}
+		}
+	}
+	return root
+}
+
+// buildSchemaTree does the second pass: builds the schema tree while
+// resolving `uses` references and skipping `grouping` blocks.
+func buildSchemaTree(lines []string, groupings map[string]*schemaNode, ns string) *schemaNode {
+	root := newSchemaNode()
+	var stack []*schemaNode
+	stack = append(stack, root)
+
+	metaDepth := 0    // depth inside metadata blocks (type enumeration {}, etc.)
+	groupingDepth := 0 // depth inside grouping blocks (skip in pass 2)
+	inGrouping := false
 
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
+		opens := strings.Count(line, "{")
+		closes := strings.Count(line, "}")
 
-		// Skip YANG metadata keywords
-		skip := false
-		for _, kw := range []string{
-			"namespace ", "prefix ", "key ", "type ", "revision ",
-			"organization ", "description", "default ", "range ",
-			"length ", "ordered-by ", "nullable ", "enum ", "format ",
-		} {
-			if strings.HasPrefix(line, kw) {
-				skip = true
-				break
+		// Skip grouping block bodies (already collected in pass 1)
+		if inGrouping {
+			groupingDepth += opens - closes
+			if groupingDepth <= 0 {
+				inGrouping = false
+				groupingDepth = 0
 			}
-		}
-		if skip {
 			continue
 		}
 
-		// module X { — treat as transparent (push root, not a new node)
+		// Skip metadata block bodies (type enumeration { enum ...; })
+		if metaDepth > 0 {
+			metaDepth += opens - closes
+			continue
+		}
+
+		// module X { — transparent wrapper
 		if strings.HasPrefix(line, "module ") {
 			if strings.HasSuffix(line, "{") {
 				stack = append(stack, root)
+			}
+			continue
+		}
+
+		// grouping foo { — skip entire block
+		if strings.HasPrefix(line, "grouping ") {
+			inGrouping = true
+			groupingDepth = opens - closes
+			continue
+		}
+
+		// uses groupingName — expand inline
+		if strings.HasPrefix(line, "uses ") {
+			name := yangNodeName(line, "uses ")
+			if g, ok := groupings[name]; ok {
+				parent := stack[len(stack)-1]
+				mergeSchema(parent, g)
 			}
 			continue
 		}
@@ -107,27 +252,27 @@ func parseSchemaFromYANG(yangText string, ns string) *schemaNode {
 			continue
 		}
 
-		for _, keyword := range []string{"container ", "list ", "leaf-list ", "leaf "} {
-			if strings.HasPrefix(line, keyword) {
-				nameEnd := strings.IndexAny(line[len(keyword):], " {;")
-				name := line[len(keyword):]
-				if nameEnd >= 0 {
-					name = line[len(keyword) : len(keyword)+nameEnd]
-				}
-				name = strings.TrimSpace(name)
+		// Metadata keywords — skip, but track depth if they open a block
+		if isYANGMetadata(line) {
+			if opens > closes {
+				metaDepth += opens - closes
+			}
+			continue
+		}
 
+		for _, kw := range []string{"container ", "list ", "leaf-list ", "leaf "} {
+			if strings.HasPrefix(line, kw) {
+				name := yangNodeName(line, kw)
 				parent := stack[len(stack)-1]
 				child, exists := parent.children[name]
 				if !exists {
 					child = newSchemaNode()
 					parent.children[name] = child
 				}
-
 				// Track namespace on top-level containers
 				if parent == root && ns != "" {
 					child.namespace = ns
 				}
-
 				if strings.HasSuffix(line, "{") {
 					stack = append(stack, child)
 				}
@@ -135,7 +280,6 @@ func parseSchemaFromYANG(yangText string, ns string) *schemaNode {
 			}
 		}
 	}
-
 	return root
 }
 

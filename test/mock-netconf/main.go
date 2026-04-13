@@ -504,6 +504,17 @@ const neSystemYang = `module ne-system {
   namespace "urn:params:xml:ns:yang:ne-system";
   prefix sys;
 
+  grouping ntp-server-config {
+    leaf address { type string; }
+    leaf prefer { type boolean; }
+  }
+
+  grouping ipv4-config {
+    leaf address { type string; }
+    leaf prefix-length { type uint8; }
+    leaf gateway { type string; }
+  }
+
   container system {
     leaf hostname { type string; }
     leaf location { type string; }
@@ -512,8 +523,7 @@ const neSystemYang = `module ne-system {
       leaf enabled { type boolean; }
       list server {
         key "address";
-        leaf address { type string; }
-        leaf prefer { type boolean; }
+        uses ntp-server-config;
       }
     }
     container dns {
@@ -542,9 +552,7 @@ const neSystemYang = `module ne-system {
       leaf enabled { type boolean; }
       leaf mtu { type uint16; }
       container ipv4 {
-        leaf address { type string; }
-        leaf prefix-length { type uint8; }
-        leaf gateway { type string; }
+        uses ipv4-config;
       }
     }
   }

@@ -12,6 +12,50 @@ module ne-system {
     description "Initial revision.";
   }
 
+  // ---------------------------------------------------------------------------
+  // Reusable groupings
+  // ---------------------------------------------------------------------------
+
+  grouping ntp-server-config {
+    description "NTP server entry fields.";
+
+    leaf address {
+      type string;
+      description "NTP server address (IP or hostname).";
+    }
+
+    leaf prefer {
+      type boolean;
+      default false;
+      description "Prefer this NTP server.";
+    }
+  }
+
+  grouping ipv4-config {
+    description "IPv4 address configuration.";
+
+    leaf address {
+      type string;
+      description "IPv4 address in dotted notation.";
+    }
+
+    leaf prefix-length {
+      type uint8 {
+        range "0..32";
+      }
+      description "Subnet prefix length.";
+    }
+
+    leaf gateway {
+      type string;
+      description "Default gateway.";
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Top-level containers
+  // ---------------------------------------------------------------------------
+
   container system {
     description "Top-level system configuration.";
 
@@ -44,17 +88,7 @@ module ne-system {
       list server {
         key "address";
         description "NTP server list.";
-
-        leaf address {
-          type string;
-          description "NTP server address (IP or hostname).";
-        }
-
-        leaf prefer {
-          type boolean;
-          default false;
-          description "Prefer this NTP server.";
-        }
+        uses ntp-server-config;
       }
     }
 
@@ -155,23 +189,7 @@ module ne-system {
 
       container ipv4 {
         description "IPv4 configuration.";
-
-        leaf address {
-          type string;
-          description "IPv4 address in dotted notation.";
-        }
-
-        leaf prefix-length {
-          type uint8 {
-            range "0..32";
-          }
-          description "Subnet prefix length.";
-        }
-
-        leaf gateway {
-          type string;
-          description "Default gateway.";
-        }
+        uses ipv4-config;
       }
     }
   }
