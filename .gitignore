@@ -6,3 +6,4 @@ host_key.pub
 cli-netconf
 mock-mgt
 mock-netconf
+config.yang

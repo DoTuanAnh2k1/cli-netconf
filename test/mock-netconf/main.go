@@ -37,7 +37,22 @@ func newDataStore() *dataStore {
 }
 
 func defaultRunningConfig() string {
-	return `<system xmlns="urn:params:xml:ns:yang:ne-system">
+	// NOTE: the <smf> block intentionally omits the <vsmf> wrapper element for
+	// <qosConf> — this reproduces the ConfD behaviour where intermediate
+	// containers whose leaves all carry default values are elided from the XML.
+	// The schema merger fix must prevent qosConf from appearing directly under
+	// nsmfPduSession in tab completion; it should only be reachable via vsmf.
+	return `<smf xmlns="urn:5gc:smf-config">
+    <nsmfPduSession>
+      <common>
+        <hostname>smf-01</hostname>
+      </common>
+      <qosConf>
+        <useLocalQos>true</useLocalQos>
+      </qosConf>
+    </nsmfPduSession>
+  </smf>
+  <system xmlns="urn:params:xml:ns:yang:ne-system">
     <hostname>ne-amf-01</hostname>
     <location>HCM Data Center, Rack A3</location>
     <contact>noc@5gc.local</contact>
@@ -284,6 +299,7 @@ func handleNetconf(ch io.ReadWriter, ds *dataStore, sessionID int64) {
     <capability>urn:ietf:params:netconf:capability:validate:1.0</capability>
     <capability>urn:ietf:params:netconf:capability:xpath:1.0</capability>
     <capability>urn:params:xml:ns:yang:ne-system?module=ne-system&amp;revision=2024-01-01</capability>
+    <capability>urn:5gc:smf-config?module=smf-config&amp;revision=2024-01-01</capability>
   </capabilities>
   <session-id>%d</session-id>
 </hello>`, sessionID)
@@ -497,7 +513,8 @@ func handleGetSchema(msgID, inner string) string {
 }
 
 var yangSchemas = map[string]string{
-	"ne-system": neSystemYang,
+	"ne-system":  neSystemYang,
+	"smf-config": smfConfigYang,
 }
 
 const neSystemYang = `module ne-system {
@@ -551,9 +568,72 @@ const neSystemYang = `module ne-system {
       leaf description { type string; }
       leaf enabled { type boolean; }
       leaf mtu { type uint16; }
+
       container ipv4 {
         uses ipv4-config;
       }
+    }
+  }
+}`
+
+// smfConfigYang is a representative subset of the real smf-config YANG module.
+// It captures the exact nesting that triggers the qosConf tab-completion bug:
+//   grouping gpNsmfPduSession → container vsmf → container qosConf
+// The running config XML omits the <vsmf> wrapper (ConfD elides containers
+// whose leaves all use default values), so parseSchemaFromXML would place
+// qosConf one level too high without the schema-merge fix.
+const smfConfigYang = `module smf-config {
+  namespace "urn:5gc:smf-config";
+  prefix smf;
+
+  grouping gpNsmfPduSession {
+    container common {
+      leaf hostname {
+        type string;
+      }
+    }
+    container vsmf {
+      container httpProtocol {
+        leaf host {
+          type string;
+        }
+        leaf port {
+          type uint16;
+        }
+      }
+      container gtpProtocol {
+        leaf listenPort {
+          type uint16;
+        }
+      }
+      container features {
+        leaf enableFeatureA {
+          type boolean;
+          default false;
+        }
+        leaf enableFeatureB {
+          type boolean;
+          default false;
+        }
+      }
+      container qosConf {
+        leaf useLocalQos {
+          type boolean;
+          default true;
+        }
+        container predefined {
+          leaf enabled {
+            type boolean;
+            default false;
+          }
+        }
+      }
+    }
+  }
+
+  container smf {
+    container nsmfPduSession {
+      uses gpNsmfPduSession;
     }
   }
 }`
