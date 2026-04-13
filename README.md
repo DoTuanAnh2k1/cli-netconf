@@ -94,11 +94,11 @@ Không có filename sẽ output ra terminal.
 cli-netconf/
 ├── cmd/
 │   ├── netconf/main.go               # SSH server + mgt-service auth (production)
-│   └── direct/main.go                # Kết nối thẳng ConfD, bỏ qua mgt-service (debug)
+│   └── direct/main.go                # Kết nối thẳng ConfD qua TCP, bỏ qua mgt-service (debug)
 ├── pkg/
 │   ├── config/config.go              # Cấu hình từ env vars
 │   ├── api/client.go                 # HTTP client cho mgt-service API
-│   ├── netconf/client.go             # NETCONF over SSH client (RFC 6241)
+│   ├── netconf/client.go             # NETCONF client — SSH (RFC 6241) và TCP
 │   └── server/
 │       ├── server.go                 # SSH server, graceful shutdown
 │       ├── session.go                # Interactive shell, session lifecycle
@@ -109,7 +109,7 @@ cli-netconf/
 │       └── formatter.go              # XML→text, text→XML, dump formats
 ├── test/
 │   ├── yang/ne-system.yang           # YANG model mẫu
-│   ├── mock-netconf/main.go          # Mock NETCONF server (get-schema support)
+│   ├── mock-netconf/main.go          # Mock NETCONF server (SSH :8830 + TCP :2023)
 │   ├── mock-mgt/main.go              # Mock mgt-service API
 │   ├── e2e_test.go                   # 28 tests (all-in-one)
 │   └── run.sh                        # Script chạy mock servers
@@ -153,15 +153,29 @@ go build -o bin/cli-direct ./cmd/direct
 MGT_SERVICE_URL=http://127.0.0.1:3000 ./bin/cli-netconf
 ```
 
-### Direct mode — kết nối thẳng ConfD
+### Direct mode — kết nối thẳng ConfD qua TCP
 
-Chỉnh địa chỉ ConfD trong `cmd/direct/main.go` rồi chạy:
+Chỉnh địa chỉ ConfD trong [cmd/direct/main.go](cmd/direct/main.go) rồi chạy:
 
 ```bash
 go run ./cmd/direct
 ```
 
-Bỏ qua hoàn toàn SSH server và mgt-service, kết nối thẳng vào ConfD NETCONF và vào CLI ngay.
+Bỏ qua hoàn toàn SSH server và mgt-service, kết nối thẳng vào ConfD qua **NETCONF over TCP** (không cần username/password). ConfD cần bật TCP transport trong `confd.conf`:
+
+```xml
+<netconf>
+  <transport>
+    <tcp>
+      <enabled>true</enabled>
+      <ip>127.0.0.1</ip>
+      <port>2023</port>
+    </tcp>
+  </transport>
+</netconf>
+```
+
+Môi trường test dùng mock server: `go run ./test/mock-netconf` — tự động lắng nghe cả SSH `:8830` và TCP `:2023`.
 
 ### Kết nối (SSH server mode)
 
@@ -273,15 +287,26 @@ kubectl apply -f deploy/k8s.yaml
 ## Testing
 
 ```bash
-# Build + start mock servers
-go build -o bin/cli-netconf ./cmd/netconf
-go build -o bin/mock-mgt ./test/mock-mgt
+# Build
+go build -o bin/cli-netconf  ./cmd/netconf
+go build -o bin/mock-mgt     ./test/mock-mgt
 go build -o bin/mock-netconf ./test/mock-netconf
-./bin/mock-mgt & ./bin/mock-netconf &
+
+# Start mock servers
+./bin/mock-mgt &      # mgt-service tại :3000
+./bin/mock-netconf &  # NETCONF SSH tại :8830, TCP tại :2023
+
+# Start CLI server
 MGT_SERVICE_URL=http://127.0.0.1:3000 ./bin/cli-netconf &
 
-# Run 28 tests
+# Run 28 e2e tests
 go test -v -timeout 300s ./test/
+```
+
+### Test direct mode (TCP)
+
+```bash
+go run ./cmd/direct   # kết nối TCP vào mock-netconf :2023, không cần auth
 ```
 
 ### Test cases (28 tests)

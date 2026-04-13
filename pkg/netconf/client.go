@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ const delimiter = "]]>]]>"
 type Client struct {
 	sshClient    *ssh.Client
 	session      *ssh.Session
+	tcpConn      net.Conn // set when using DialTCP
 	stdin        io.WriteCloser
 	stdout       io.Reader
 	msgID        atomic.Uint64
@@ -91,6 +93,42 @@ func Dial(ctx context.Context, host string, port int, username, password string)
 
 	return c, nil
 }
+
+// DialTCP connects to a NETCONF server over plain TCP (no SSH).
+// ConfD must enable TCP transport in confd.conf.
+func DialTCP(ctx context.Context, host string, port int) (*Client, error) {
+	addr := fmt.Sprintf("%s:%d", host, port)
+
+	d := net.Dialer{Timeout: 30 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("tcp dial %s: %w", addr, err)
+	}
+
+	rw := conn.(io.ReadWriter)
+	c := &Client{
+		tcpConn: conn,
+		stdin:   io.NopCloser(rw).(io.WriteCloser),
+		stdout:  rw,
+	}
+
+	// stdin must be a WriteCloser — wrap net.Conn since it does not expose separate pipes
+	c.stdin = &connWriter{conn}
+
+	if err := c.exchangeHello(ctx); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("hello exchange: %w", err)
+	}
+
+	return c, nil
+}
+
+// connWriter wraps net.Conn into an io.WriteCloser.
+// Close is a no-op here; the actual connection is closed via tcpConn.
+type connWriter struct{ net.Conn }
+
+func (w *connWriter) Write(p []byte) (int, error) { return w.Conn.Write(p) }
+func (w *connWriter) Close() error                { return nil }
 
 func (c *Client) exchangeHello(ctx context.Context) error {
 	serverHello, err := c.readMessage(ctx)
@@ -269,6 +307,9 @@ func (c *Client) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c.SendRPC(ctx, "  <close-session/>")
+	if c.tcpConn != nil {
+		return c.tcpConn.Close()
+	}
 	c.session.Close()
 	return c.sshClient.Close()
 }

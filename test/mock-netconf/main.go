@@ -132,6 +132,10 @@ func main() {
 	if p := os.Getenv("NETCONF_PORT"); p != "" {
 		port = p
 	}
+	tcpPort := "2023"
+	if p := os.Getenv("NETCONF_TCP_PORT"); p != "" {
+		tcpPort = p
+	}
 	user := "admin"
 	if u := os.Getenv("NETCONF_USER"); u != "" {
 		user = u
@@ -163,20 +167,49 @@ func main() {
 	ds := newDataStore()
 	var sessionCounter atomic.Int64
 
-	listener, err := net.Listen("tcp", ":"+port)
+	// SSH listener
+	sshListener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("Mock NETCONF server listening on :%s (user=%s)", port, user)
+	log.Printf("Mock NETCONF/SSH listening on :%s (user=%s)", port, user)
+
+	// TCP listener (no auth)
+	tcpListener, err := net.Listen("tcp", ":"+tcpPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Mock NETCONF/TCP listening on :%s (no auth)", tcpPort)
+
+	go func() {
+		for {
+			conn, err := tcpListener.Accept()
+			if err != nil {
+				log.Println("tcp accept:", err)
+				continue
+			}
+			go handleTCPConn(conn, ds, sessionCounter.Add(1))
+		}
+	}()
 
 	for {
-		conn, err := listener.Accept()
+		conn, err := sshListener.Accept()
 		if err != nil {
-			log.Println("accept:", err)
+			log.Println("ssh accept:", err)
 			continue
 		}
 		go handleSSHConn(conn, sshCfg, ds, sessionCounter.Add(1))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// TCP connection (NETCONF over TCP, no SSH)
+// ---------------------------------------------------------------------------
+
+func handleTCPConn(conn net.Conn, ds *dataStore, sessionID int64) {
+	defer conn.Close()
+	log.Printf("[session %d] tcp connected from %s", sessionID, conn.RemoteAddr())
+	handleNetconf(conn, ds, sessionID)
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +273,7 @@ func handleChannel(ch ssh.Channel, reqs <-chan *ssh.Request, ds *dataStore, sess
 // NETCONF session
 // ---------------------------------------------------------------------------
 
-func handleNetconf(ch ssh.Channel, ds *dataStore, sessionID int64) {
+func handleNetconf(ch io.ReadWriter, ds *dataStore, sessionID int64) {
 	// Send server hello
 	hello := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
