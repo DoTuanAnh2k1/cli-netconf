@@ -75,10 +75,37 @@ Không có filename sẽ output ra terminal.
 - Tab complete lệnh: `sh<TAB>` → `show`
 - Tab complete sub-command: `show r<TAB>` → `show running-config`
 - Tab complete config path: `show running-config system n<TAB>` → `ntp`
+- Tab complete cả leaf lẫn container: `show running-config system <TAB>` → `contact  dns  hostname  location  logging  ntp`
 - Tab complete cho `set`, `unset`: `set system host<TAB>` → `hostname`
 - Tab complete cho `dump`: `dump t<TAB>` → `text`
 - Schema tự động load từ YANG (get-schema RFC 6022) + running config
 - Thấy được tất cả leaf/container kể cả chưa set giá trị
+
+### Command History
+- Bấm **↑ (mũi tên lên)** để xem lệnh trước
+- Bấm **↓ (mũi tên xuống)** để trở lại lệnh sau
+- Lưu toàn bộ lịch sử trong phiên làm việc hiện tại (giữ 100 lệnh)
+- Ctrl-R để tìm kiếm ngược trong history (nếu terminal hỗ trợ)
+
+### Pager (cuộn trang)
+
+Khi output của `show running-config` hoặc `show candidate-config` dài hơn 20 dòng, CLI tự động hiển thị từng trang:
+
+```
+system
+  hostname                 ne-amf-01
+  ...                      (dòng 1-20)
+<MORE> — 35 lines left  [Enter] next  [a/G/End/PgDn] all  [q] quit
+```
+
+| Phím | Hành động |
+|---|---|
+| **Enter** hoặc **Space** | Hiện trang tiếp theo (20 dòng) |
+| **a** hoặc **G** | Hiện toàn bộ phần còn lại ngay lập tức |
+| **End** hoặc **PageDown** | Hiện toàn bộ phần còn lại ngay lập tức |
+| **q** hoặc **Esc** | Thoát pager, quay lại prompt |
+
+Dòng `<MORE>` tự động xoá khi tiếp tục, không để lại dấu vết trong output.
 
 ### Graceful Shutdown
 - Server nhận SIGINT/SIGTERM → đóng tất cả active SSH sessions → thoát sạch
@@ -94,7 +121,9 @@ Không có filename sẽ output ra terminal.
 cli-netconf/
 ├── cmd/
 │   ├── netconf/main.go               # SSH server + mgt-service auth (production)
-│   └── direct/main.go                # Kết nối thẳng ConfD qua TCP, bỏ qua mgt-service (debug)
+│   ├── direct/main.go                # Kết nối trực tiếp ConfD (TCP hoặc SSH, env NETCONF_MODE)
+│   ├── direct-ssh/main.go            # Kết nối thẳng ConfD qua SSH (172.16.25.131:2075)
+│   └── direct-tcp/main.go            # Kết nối thẳng ConfD qua TCP (127.0.0.1:2023)
 ├── pkg/
 │   ├── config/config.go              # Cấu hình từ env vars
 │   ├── api/client.go                 # HTTP client cho mgt-service API
@@ -128,8 +157,14 @@ cli-netconf/
 # SSH server (production)
 go build -o bin/cli-netconf ./cmd/netconf
 
-# Direct mode (debug)
+# Direct mode — tự chọn TCP hoặc SSH qua env NETCONF_MODE
 go build -o bin/cli-direct ./cmd/direct
+
+# Direct SSH — kết nối thẳng qua SSH (hardcode 172.16.25.131:2075)
+go build -o bin/cli-direct-ssh ./cmd/direct-ssh
+
+# Direct TCP — kết nối thẳng qua TCP (hardcode 127.0.0.1:2023)
+go build -o bin/cli-direct-tcp ./cmd/direct-tcp
 ```
 
 ### Cấu hình (`cmd/netconf`)
@@ -259,14 +294,30 @@ admin[ne-amf-01]> dump xml /tmp/config.xml
 Saved to /tmp/config.xml (289471 bytes)
 ```
 
-### Tab completion
+### Tab completion & command history
 
 ```
-admin[ne-amf-01]> sh<TAB>                          → show
+admin[ne-amf-01]> sh<TAB>                              → show
 admin[ne-amf-01]> show running-config system <TAB>
   contact    dns        hostname   location   logging    ntp
-admin[ne-amf-01]> set system host<TAB>              → set system hostname
-admin[ne-amf-01]> unset sys<TAB>                    → unset system
+admin[ne-amf-01]> show running-config system ntp <TAB>
+  enabled    server
+admin[ne-amf-01]> set system host<TAB>                 → set system hostname
+admin[ne-amf-01]> unset sys<TAB>                       → unset system
+
+# Dùng mũi tên ↑/↓ để điều hướng lịch sử lệnh
+admin[ne-amf-01]> ↑                                    → lệnh trước đó
+```
+
+### Pager
+
+```
+admin[ne-amf-01]> show running-config
+system
+  hostname                 ne-amf-01
+  location                 HCM Data Center, Rack A3
+  ...
+<MORE> — 35 lines left  [Enter] next  [a/G/End/PgDn] all  [q] quit
 ```
 
 ## Deploy K8s

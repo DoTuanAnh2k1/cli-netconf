@@ -20,6 +20,7 @@ func RunDirect(nc *netconf.Client, ne *api.NeDataItem, rw io.ReadWriter) {
 	sess := &session{
 		term:      term.NewTerminal(rw, ""),
 		sshConn:   rw,
+		rawReader: rw,
 		cfg:       cfg,
 		username:  "admin",
 		nc:        nc,

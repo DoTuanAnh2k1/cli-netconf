@@ -27,6 +27,7 @@ const (
 type session struct {
 	term      *term.Terminal
 	sshConn   io.Writer // raw SSH channel for completion display
+	rawReader io.Reader // underlying reader — used for pager key detection
 	api       *api.Client
 	cfg       *config.Config
 	token     string
@@ -42,12 +43,13 @@ func handleSession(s gssh.Session, apiClient *api.Client, cfg *config.Config) {
 	token, _ := s.Context().Value(keyToken).(string)
 
 	sess := &session{
-		term:     term.NewTerminal(s, ""),
-		sshConn:  s,
-		api:      apiClient,
-		cfg:      cfg,
-		token:    token,
-		username: s.User(),
+		term:      term.NewTerminal(s, ""),
+		sshConn:   s,
+		rawReader: s,
+		api:       apiClient,
+		cfg:       cfg,
+		token:     token,
+		username:  s.User(),
 	}
 	sess.updatePrompt()
 	sess.term.AutoCompleteCallback = sess.handleComplete
@@ -175,11 +177,19 @@ func (s *session) requireConnection() bool {
 }
 
 // writePaged writes text to the terminal one page at a time.
-// After each page a <MORE> prompt is shown; press Enter to continue, q to quit.
+// After each page a <MORE> prompt is shown at the bottom of the screen.
+// Controls: Enter/Space = next page  a/G/End/PageDown = show all  q/Esc/Ctrl-C = quit
 const pageSize = 20
 
+type moreAction int
+
+const (
+	moreNext moreAction = iota
+	moreAll
+	moreQuit
+)
+
 func (s *session) writePaged(text string) {
-	// Trim trailing newline so the split doesn't add a spurious blank line
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	total := len(lines)
 
@@ -195,12 +205,79 @@ func (s *session) writePaged(text string) {
 		if i >= total {
 			break
 		}
-		// Prompt for next page
-		s.term.SetPrompt(fmt.Sprintf("%s<MORE>%s (Enter=continue, q=quit) ", colorYellow, colorReset))
-		input, err := s.term.ReadLine()
-		s.updatePrompt()
-		if err != nil || strings.ToLower(strings.TrimSpace(input)) == "q" {
-			break
+
+		remaining := total - i
+		prompt := fmt.Sprintf("%s<MORE>%s — %d lines left  [Enter] next  [a/G/End/PgDn] all  [q] quit ",
+			colorYellow, colorReset, remaining)
+
+		// Write MORE prompt directly (no newline — stays on same line at bottom)
+		if s.sshConn != nil {
+			s.sshConn.Write([]byte(prompt))
+		}
+
+		action := s.readMoreKey()
+
+		// Erase the <MORE> line entirely before continuing
+		if s.sshConn != nil {
+			s.sshConn.Write([]byte("\r\033[2K"))
+		}
+
+		switch action {
+		case moreQuit:
+			return
+		case moreAll:
+			for _, ln := range lines[i:] {
+				fmt.Fprintf(s.term, "%s\n", ln)
+			}
+			return
+		// moreNext: fall through to loop
 		}
 	}
+}
+
+// readMoreKey reads a single raw keypress from the underlying reader and
+// interprets it as a pager action. It works outside of term.Terminal so
+// keystrokes are not echoed and escape sequences can be parsed directly.
+func (s *session) readMoreKey() moreAction {
+	if s.rawReader == nil {
+		return moreQuit
+	}
+	buf := make([]byte, 16)
+	n, _ := s.rawReader.Read(buf)
+	if n == 0 {
+		return moreQuit
+	}
+	b := buf[:n]
+
+	// ESC sequence: End (\033[F or \033[4~) and PageDown (\033[6~) → show all
+	if b[0] == 0x1b {
+		if n >= 3 && b[1] == '[' {
+			switch b[2] {
+			case 'F': // End key
+				return moreAll
+			case '4':
+				if n >= 4 && b[3] == '~' { // End key (alternate)
+					return moreAll
+				}
+			case '6':
+				if n >= 4 && b[3] == '~' { // PageDown
+					return moreAll
+				}
+			case 'A', 'B': // Up/Down arrow — treat as next page
+				return moreNext
+			}
+		}
+		// ESC alone or unrecognized sequence → quit
+		return moreQuit
+	}
+
+	switch b[0] {
+	case 'q', 'Q', 3: // q, Q, Ctrl-C
+		return moreQuit
+	case 'a', 'A', 'G', 'g': // show all remaining
+		return moreAll
+	}
+
+	// Enter (\r or \n), Space, or any other key → next page
+	return moreNext
 }
