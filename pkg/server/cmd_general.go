@@ -129,7 +129,7 @@ func (s *session) cmdShowConfig(source string, path []string) {
 	}
 
 	output := formatXMLResponse(reply, path)
-	s.writef("%s", output)
+	s.writePaged(output)
 	s.writef("%s(%s)%s\n", colorDim, elapsed.Round(time.Millisecond), colorReset)
 	s.saveHistory("show "+source+"-config", elapsed)
 }

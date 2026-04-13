@@ -430,7 +430,7 @@ func (s *session) completeArgs(cmd string, args []string, word string) []string 
 		}
 		sub := strings.ToLower(args[0])
 		if sub == "running-config" || sub == "candidate-config" {
-			return s.pathCompletions(args[1:], word, true)
+			return s.pathCompletions(args[1:], word, false)
 		}
 
 	case "connect":

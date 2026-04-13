@@ -173,3 +173,34 @@ func (s *session) requireConnection() bool {
 	}
 	return true
 }
+
+// writePaged writes text to the terminal one page at a time.
+// After each page a <MORE> prompt is shown; press Enter to continue, q to quit.
+const pageSize = 20
+
+func (s *session) writePaged(text string) {
+	// Trim trailing newline so the split doesn't add a spurious blank line
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	total := len(lines)
+
+	for i := 0; i < total; {
+		end := i + pageSize
+		if end > total {
+			end = total
+		}
+		for _, ln := range lines[i:end] {
+			fmt.Fprintf(s.term, "%s\n", ln)
+		}
+		i = end
+		if i >= total {
+			break
+		}
+		// Prompt for next page
+		s.term.SetPrompt(fmt.Sprintf("%s<MORE>%s (Enter=continue, q=quit) ", colorYellow, colorReset))
+		input, err := s.term.ReadLine()
+		s.updatePrompt()
+		if err != nil || strings.ToLower(strings.TrimSpace(input)) == "q" {
+			break
+		}
+	}
+}
