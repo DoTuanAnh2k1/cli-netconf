@@ -39,14 +39,26 @@ func New(cfg *config.Config, apiClient *api.Client) (*Server, error) {
 			handleSession(s, apiClient, cfg)
 		},
 		PasswordHandler: func(ctx gssh.Context, password string) bool {
+			slog.Info("auth attempt", "user", ctx.User(), "remote_addr", ctx.RemoteAddr())
 			resp, err := apiClient.Authenticate(ctx.User(), password)
 			if err != nil {
 				slog.Warn("auth failed", "user", ctx.User(), "error", err)
 				return false
 			}
-			ctx.SetValue(keyToken, resp.ResponseData)
+			token := resp.ResponseData
+			tokenPreview := token
+			if len(tokenPreview) > 20 {
+				tokenPreview = tokenPreview[:20] + "..."
+			}
+			ctx.SetValue(keyToken, token)
 			ctx.SetValue(keySystemType, resp.SystemType)
-			slog.Info("auth success", "user", ctx.User(), "system_type", resp.SystemType)
+			slog.Info("auth success",
+				"user", ctx.User(),
+				"system_type", resp.SystemType,
+				"response_code", resp.ResponseCode,
+				"token_prefix", tokenPreview,
+				"token_len", len(token),
+			)
 			return true
 		},
 	}

@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -52,6 +53,7 @@ type session struct {
 
 func handleSession(s gssh.Session, apiClient *api.Client, cfg *config.Config) {
 	token, _ := s.Context().Value(keyToken).(string)
+	slog.Info("session started", "user", s.User(), "remote_addr", s.RemoteAddr())
 
 	sess := &session{
 		term:      term.NewTerminal(s, ""),
@@ -91,6 +93,7 @@ func handleSession(s gssh.Session, apiClient *api.Client, cfg *config.Config) {
 		// run() returned false → user typed "exit" while connected, or "disconnect"
 		// Loop back to show NE list again.
 	}
+	slog.Info("session ended", "user", s.User(), "remote_addr", s.RemoteAddr())
 	sess.writef("Goodbye.\n")
 }
 
@@ -140,6 +143,12 @@ func (s *session) run() bool {
 		parts := strings.Fields(line)
 		cmd := strings.ToLower(parts[0])
 		args := parts[1:]
+
+		ne := ""
+		if s.currentNE != nil {
+			ne = s.currentNE.Ne
+		}
+		slog.Info("user command", "user", s.username, "ne", ne, "cmd", cmd, "args", args)
 
 		switch cmd {
 		case "show":
