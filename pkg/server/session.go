@@ -51,6 +51,18 @@ func handleSession(s gssh.Session, apiClient *api.Client, cfg *config.Config) {
 		token:     token,
 		username:  s.User(),
 	}
+
+	// Set terminal width/height from the SSH client's PTY and watch for resizes.
+	// Without this, term.Terminal defaults to 80 columns and lines wrap early.
+	if pty, winCh, ok := s.Pty(); ok {
+		sess.term.SetSize(pty.Window.Width, pty.Window.Height)
+		go func() {
+			for win := range winCh {
+				sess.term.SetSize(win.Width, win.Height)
+			}
+		}()
+	}
+
 	sess.updatePrompt()
 	sess.term.AutoCompleteCallback = sess.handleComplete
 	sess.welcome()
