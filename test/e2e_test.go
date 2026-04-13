@@ -182,7 +182,7 @@ func TestWelcomeBannerAndNEList(t *testing.T) {
 	reader := newAsyncReader(stdout)
 	out := stripANSI(reader.collect(3 * time.Second))
 
-	if !strings.Contains(out, "VHT CLI - NETCONF Console") {
+	if !strings.Contains(out, "CLI - NETCONF Console") {
 		t.Errorf("missing banner")
 	}
 	if !strings.Contains(out, "ne-amf-01") {
@@ -306,7 +306,7 @@ func TestSetXML(t *testing.T) {
 
 	ts.send("set")
 	time.Sleep(200 * time.Millisecond)
-	ts.send(`<system xmlns="urn:vht:params:xml:ns:yang:vht-system">`)
+	ts.send(`<system xmlns="urn:params:xml:ns:yang:ne-system">`)
 	ts.send(`  <hostname>xml-test</hostname>`)
 	ts.send(`</system>`)
 	ts.send(".")
@@ -578,7 +578,7 @@ func TestUnknownCommand(t *testing.T) {
 
 func generateLargeConfig(count int) string {
 	var buf strings.Builder
-	buf.WriteString(`<interfaces xmlns="urn:vht:params:xml:ns:yang:vht-system">`)
+	buf.WriteString(`<interfaces xmlns="urn:params:xml:ns:yang:ne-system">`)
 	for i := 0; i < count; i++ {
 		fmt.Fprintf(&buf, `
   <interface>

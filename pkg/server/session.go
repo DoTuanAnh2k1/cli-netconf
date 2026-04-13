@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/DoTuanAnh2k1/cli-netconf/internal/api"
-	"github.com/DoTuanAnh2k1/cli-netconf/internal/config"
-	"github.com/DoTuanAnh2k1/cli-netconf/internal/netconf"
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/api"
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/config"
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/netconf"
 
 	gssh "github.com/gliderlabs/ssh"
 	"golang.org/x/term"
@@ -70,7 +70,7 @@ func (s *session) updatePrompt() {
 func (s *session) welcome() {
 	s.writef("%s", colorGreen)
 	s.writef("============================================\n")
-	s.writef("        VHT CLI - NETCONF Console\n")
+	s.writef("        CLI - NETCONF Console\n")
 	s.writef("============================================%s\n\n", colorReset)
 }
 

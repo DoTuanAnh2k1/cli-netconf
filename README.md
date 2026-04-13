@@ -1,4 +1,4 @@
-# VHT CLI - NETCONF Console
+# CLI - NETCONF Console
 
 CLI cho phép user SSH vào để quản lý cấu hình các Network Element (NE) trong hệ thống 5GC thông qua giao thức NETCONF (RFC 6241).
 
@@ -93,7 +93,7 @@ Không có filename sẽ output ra terminal.
 ```
 cli-netconf/
 ├── main.go                           # Entry point, graceful shutdown
-├── internal/
+├── pkg/
 │   ├── config/config.go              # Cấu hình từ env vars
 │   ├── api/client.go                 # HTTP client cho mgt-service API
 │   ├── netconf/client.go             # NETCONF over SSH client (RFC 6241)
@@ -102,10 +102,10 @@ cli-netconf/
 │       ├── session.go                # Interactive shell, session lifecycle
 │       ├── cmd_general.go            # show, connect, help, exit, loadSchema
 │       ├── cmd_netconf.go            # set, unset, commit, dump, lock, rpc
-│       ├── completer.go             # Tab completion, YANG parser, schema tree
+│       ├── completer.go              # Tab completion, YANG parser, schema tree
 │       └── formatter.go              # XML→text, text→XML, dump formats
 ├── test/
-│   ├── yang/vht-system.yang          # YANG model mẫu
+│   ├── yang/ne-system.yang            # YANG model mẫu
 │   ├── mock-netconf/main.go          # Mock NETCONF server (get-schema support)
 │   ├── mock-mgt/main.go             # Mock mgt-service API
 │   ├── e2e_test.go                   # 28 tests (all-in-one)
@@ -156,7 +156,7 @@ ssh admin@127.0.0.1 -p 2222
 
 ```
 ============================================
-        VHT CLI - NETCONF Console
+        CLI - NETCONF Console
 ============================================
 
   #  NE          Site  IP         Port  Namespace  Description

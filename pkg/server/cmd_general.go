@@ -9,7 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/DoTuanAnh2k1/cli-netconf/internal/netconf"
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/netconf"
 )
 
 // --- auto select NE on login ---

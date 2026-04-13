@@ -8,9 +8,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DoTuanAnh2k1/cli-netconf/internal/api"
-	"github.com/DoTuanAnh2k1/cli-netconf/internal/config"
-	"github.com/DoTuanAnh2k1/cli-netconf/internal/server"
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/api"
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/config"
+	"github.com/DoTuanAnh2k1/cli-netconf/pkg/server"
 )
 
 func main() {

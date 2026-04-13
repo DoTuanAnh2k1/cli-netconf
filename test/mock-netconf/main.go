@@ -37,10 +37,10 @@ func newDataStore() *dataStore {
 }
 
 func defaultRunningConfig() string {
-	return `<system xmlns="urn:vht:params:xml:ns:yang:vht-system">
+	return `<system xmlns="urn:params:xml:ns:yang:ne-system">
     <hostname>ne-amf-01</hostname>
     <location>HCM Data Center, Rack A3</location>
-    <contact>noc@vht.com.vn</contact>
+    <contact>noc@5gc.local</contact>
     <ntp>
       <enabled>true</enabled>
       <server>
@@ -53,8 +53,8 @@ func defaultRunningConfig() string {
       </server>
     </ntp>
     <dns>
-      <search>vht.internal</search>
-      <search>vht.com.vn</search>
+      <search>5gc.local</search>
+      <search>5gc.example</search>
       <server>
         <address>8.8.8.8</address>
       </server>
@@ -71,7 +71,7 @@ func defaultRunningConfig() string {
       </remote-server>
     </logging>
   </system>
-  <interfaces xmlns="urn:vht:params:xml:ns:yang:vht-system">
+  <interfaces xmlns="urn:params:xml:ns:yang:ne-system">
     <interface>
       <name>eth0</name>
       <description>Management Interface</description>
@@ -250,7 +250,7 @@ func handleNetconf(ch ssh.Channel, ds *dataStore, sessionID int64) {
     <capability>urn:ietf:params:netconf:capability:confirmed-commit:1.0</capability>
     <capability>urn:ietf:params:netconf:capability:validate:1.0</capability>
     <capability>urn:ietf:params:netconf:capability:xpath:1.0</capability>
-    <capability>urn:vht:params:xml:ns:yang:vht-system?module=vht-system&amp;revision=2024-01-01</capability>
+    <capability>urn:params:xml:ns:yang:ne-system?module=ne-system&amp;revision=2024-01-01</capability>
   </capabilities>
   <session-id>%d</session-id>
 </hello>`, sessionID)
@@ -440,7 +440,7 @@ func handleLock(msgID, inner string, ds *dataStore, lock bool) string {
 // --- get-schema (RFC 6022) ---
 
 func handleGetSchema(msgID, inner string) string {
-	// Extract identifier from <identifier>vht-system</identifier>
+	// Extract identifier from <identifier>ne-system</identifier>
 	identifier := extractTag(inner, "identifier")
 	if identifier == "" {
 		return rpcErrorReply(msgID, "protocol", "missing-element", "Missing <identifier>")
@@ -464,11 +464,11 @@ func handleGetSchema(msgID, inner string) string {
 }
 
 var yangSchemas = map[string]string{
-	"vht-system": vhtSystemYang,
+	"ne-system": neSystemYang,
 }
 
-const vhtSystemYang = `module vht-system {
-  namespace "urn:vht:params:xml:ns:yang:vht-system";
+const neSystemYang = `module ne-system {
+  namespace "urn:params:xml:ns:yang:ne-system";
   prefix sys;
 
   container system {

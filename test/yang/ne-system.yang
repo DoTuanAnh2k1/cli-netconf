@@ -1,11 +1,11 @@
-module vht-system {
-  namespace "urn:vht:params:xml:ns:yang:vht-system";
+module ne-system {
+  namespace "urn:params:xml:ns:yang:ne-system";
   prefix sys;
 
-  organization "VHT";
-  contact "VHT 5GC Team";
+  organization "5GC Team";
+  contact "5GC Team";
   description
-    "YANG module for VHT 5GC Network Element system configuration.
+    "YANG module for 5GC Network Element system configuration.
      Used with ConfD for NETCONF-based management.";
 
   revision 2024-01-01 {
