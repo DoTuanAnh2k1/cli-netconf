@@ -33,6 +33,19 @@ func (n *schemaNode) childNames() []string {
 	return names
 }
 
+// containerChildNames returns only children that have sub-children (containers/lists).
+// Used for path navigation commands like "show" where leaf nodes are not useful mid-path.
+func (n *schemaNode) containerChildNames() []string {
+	names := make([]string, 0, len(n.children))
+	for name, child := range n.children {
+		if child.isContainer() {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (n *schemaNode) lookup(path []string) *schemaNode {
 	node := n
 	for _, p := range path {
@@ -273,7 +286,7 @@ func (s *session) completeArgs(cmd string, args []string, word string) []string 
 		}
 		sub := strings.ToLower(args[0])
 		if sub == "running-config" || sub == "candidate-config" {
-			return s.pathCompletions(args[1:], word)
+			return s.pathCompletions(args[1:], word, true)
 		}
 
 	case "connect":
@@ -288,7 +301,7 @@ func (s *session) completeArgs(cmd string, args []string, word string) []string 
 		return filterByPrefix(opts, word)
 
 	case "set", "unset":
-		return s.pathCompletions(args, word)
+		return s.pathCompletions(args, word, false)
 
 	case "dump":
 		if len(args) == 1 {
@@ -304,7 +317,9 @@ func (s *session) completeArgs(cmd string, args []string, word string) []string 
 
 // pathCompletions completes space-separated config paths using the schema tree.
 // pathArgs includes the word being typed as the last element.
-func (s *session) pathCompletions(pathArgs []string, word string) []string {
+// containersOnly restricts suggestions to nodes that have children (containers/lists),
+// which is appropriate for navigation commands like "show".
+func (s *session) pathCompletions(pathArgs []string, word string, containersOnly bool) []string {
 	if s.schema == nil {
 		return nil
 	}
@@ -316,6 +331,9 @@ func (s *session) pathCompletions(pathArgs []string, word string) []string {
 		return nil
 	}
 
+	if containersOnly {
+		return filterByPrefix(node.containerChildNames(), word)
+	}
 	return filterByPrefix(node.childNames(), word)
 }
 

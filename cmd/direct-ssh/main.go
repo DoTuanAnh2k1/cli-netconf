@@ -18,14 +18,14 @@ import (
 
 // Connection parameters — override via environment variables.
 //
-//	NETCONF_HOST  target host           (default: 171.16.25.131)
+//	NETCONF_HOST  target host           (default: 172.16.25.131)
 //	NETCONF_PORT  target port           (default: 2075)
 //	NETCONF_USER  SSH username          (default: admin)
 //	NETCONF_PASS  SSH password          (default: admin)
 //	NE_NAME       label shown in prompt (default: confd)
 
 const (
-	defaultHost = "171.16.25.131"
+	defaultHost = "172.16.25.131"
 	defaultPort = 2075
 	defaultUser = "admin"
 	defaultPass = "admin"
