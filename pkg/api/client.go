@@ -180,7 +180,7 @@ func (c *Client) ListNE(token string) (*NeListResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", token)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -228,7 +228,7 @@ func (c *Client) SaveHistory(token string, req *HistorySaveRequest) error {
 	if err != nil {
 		return err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Authorization", token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(httpReq)
@@ -265,7 +265,7 @@ func (c *Client) SaveBackup(token string, req *BackupSaveRequest) (*BackupSaveRe
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Authorization", token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(httpReq)
@@ -301,7 +301,7 @@ func (c *Client) ListBackups(token, neName string) (*BackupListResponse, error) 
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Authorization", token)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -340,7 +340,7 @@ func (c *Client) GetBackup(token string, id int) (*BackupDetailResponse, error) 
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Authorization", token)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -381,7 +381,7 @@ func (c *Client) ChangePassword(token string, req *ChangePasswordRequest) error 
 	if err != nil {
 		return err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Authorization", token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(httpReq)
