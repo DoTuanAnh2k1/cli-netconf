@@ -51,5 +51,5 @@ func RunDirect(nc *netconf.Client, ne *api.NeDataItem, rw io.ReadWriter) {
 	sess.term.AutoCompleteCallback = sess.handleComplete
 	sess.welcome()
 	sess.loadSchema()
-	sess.run()
+	sess.run() //nolint:errcheck — direct mode always exits when run() returns
 }

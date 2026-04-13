@@ -14,30 +14,40 @@ import (
 
 // --- auto select NE on login ---
 
-func (s *session) autoSelectNE() {
+// autoSelectNE shows the NE list and waits for the user to select one.
+// Returns true if an NE was successfully connected, false if the user typed
+// "exit" or the connection dropped (caller should end the SSH session).
+func (s *session) autoSelectNE() bool {
 	resp, err := s.api.ListNE(s.token)
 	if err != nil {
 		s.writef("%sCould not load NE list: %s%s\n", colorRed, err, colorReset)
-		return
+		return false
 	}
 	s.neList = resp.NeDataList
 	if len(s.neList) == 0 {
 		s.writef("No network elements available.\n")
-		return
+		return false
 	}
 
 	s.displayNETable()
 	s.writef("\n")
 
-	s.term.SetPrompt(fmt.Sprintf("Select NE [1-%d or name]: ", len(s.neList)))
+	s.term.SetPrompt(fmt.Sprintf("Select NE [1-%d or name] (exit to quit): ", len(s.neList)))
+	defer s.updatePrompt()
+
 	for {
 		line, err := s.term.ReadLine()
 		if err != nil {
-			return
+			// Ctrl+C — cancel current input, redisplay the prompt.
+			s.writef("\n")
+			continue
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
+		}
+		if strings.ToLower(line) == "exit" {
+			return false
 		}
 
 		idx := s.resolveNE(line)
@@ -47,9 +57,8 @@ func (s *session) autoSelectNE() {
 			continue
 		}
 		s.doConnect(idx)
-		break
+		return true
 	}
-	s.updatePrompt()
 }
 
 // resolveNE returns 1-based index for a number or NE name, or -1 if not found.

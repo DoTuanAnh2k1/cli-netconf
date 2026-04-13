@@ -76,8 +76,21 @@ func handleSession(s gssh.Session, apiClient *api.Client, cfg *config.Config) {
 	sess.updatePrompt()
 	sess.term.AutoCompleteCallback = sess.handleComplete
 	sess.welcome()
-	sess.autoSelectNE()
-	sess.run()
+
+	// Outer loop: NE selection → command loop → back to NE selection on disconnect.
+	// Exit the outer loop when the user explicitly types "exit" at the NE selection
+	// prompt, or when the SSH connection drops.
+	for {
+		if !sess.autoSelectNE() {
+			break // user typed "exit" at NE selection, or connection dropped
+		}
+		if sess.run() {
+			break // user typed "exit" while not connected (already disconnected)
+		}
+		// run() returned false → user typed "exit" while connected, or "disconnect"
+		// Loop back to show NE list again.
+	}
+	sess.writef("Goodbye.\n")
 }
 
 func (s *session) updatePrompt() {
@@ -98,12 +111,26 @@ func (s *session) welcome() {
 	s.writef("============================================%s\n\n", colorReset)
 }
 
-func (s *session) run() {
+// run is the main command loop for a connected (or recently disconnected) session.
+// Returns true if the SSH session should end, false if control should return to
+// the NE selection screen (user typed "exit" while connected, or "disconnect").
+func (s *session) run() bool {
+	consecutiveErrors := 0
 	for {
 		line, err := s.term.ReadLine()
 		if err != nil {
-			break
+			consecutiveErrors++
+			if consecutiveErrors >= 3 {
+				// Real EOF / SSH connection dropped — end the session.
+				s.cmdDisconnect()
+				return true
+			}
+			// Ctrl+C — cancel current input and redisplay the prompt.
+			s.writef("\n")
+			continue
 		}
+		consecutiveErrors = 0
+
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -119,7 +146,9 @@ func (s *session) run() {
 		case "connect":
 			s.cmdConnect(args)
 		case "disconnect":
+			// Disconnect and return to NE selection.
 			s.cmdDisconnect()
+			return false
 		case "set":
 			s.cmdSet(args)
 		case "unset":
@@ -143,15 +172,18 @@ func (s *session) run() {
 		case "help":
 			s.cmdHelp()
 		case "exit", "quit":
-			s.cmdDisconnect()
-			s.writef("Goodbye.\n")
-			return
+			if s.nc != nil {
+				// Connected: disconnect and go back to NE selection.
+				s.cmdDisconnect()
+				return false
+			}
+			// Not connected: exit the SSH session entirely.
+			return true
 		default:
 			s.writef("%sUnknown command: %s%s\n", colorRed, cmd, colorReset)
 			s.writef("Type 'help' for available commands.\n")
 		}
 	}
-	s.cmdDisconnect()
 }
 
 // --- Helpers ---
