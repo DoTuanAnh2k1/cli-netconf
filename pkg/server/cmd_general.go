@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -309,48 +307,26 @@ func (s *session) cmdDisconnect() {
 	s.writef("Disconnected from %s.\n", name)
 }
 
-// loadSchemaFromDir loads all .yang files from the configured yang_dir and
-// merges them into the schema. This provides correct deep structure for modules
-// that the NE doesn't advertise via get-schema (e.g. proprietary ConfD modules).
-func (s *session) loadSchemaFromDir() {
-	dir := s.cfg.YangDir
-	if dir == "" {
-		return
+// moduleNameFromNamespace derives a YANG module name to try for get-schema
+// from an XML namespace URI. Common conventions:
+//   "urn:5gc:smf-config"                         → "smf-config"
+//   "urn:ietf:params:xml:ns:yang:ietf-interfaces" → "ietf-interfaces"
+func moduleNameFromNamespace(ns string) string {
+	if ns == "" {
+		return ""
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("schema: cannot read yang_dir", "dir", dir, "error", err)
+	// Take the last segment after ':' or '/'
+	last := ns
+	for _, sep := range []string{":", "/"} {
+		if idx := strings.LastIndex(last, sep); idx >= 0 {
+			last = last[idx+1:]
 		}
-		return
 	}
-	loaded := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yang") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			slog.Warn("schema: cannot read yang file", "file", path, "error", err)
-			continue
-		}
-		parsed := parseSchemaFromYANG(string(data), "")
-		mergeSchema(s.schema, parsed)
-		slog.Info("schema: loaded from local file", "file", e.Name(), "top_elements", parsed.childNames())
-		loaded++
-	}
-	if loaded > 0 {
-		slog.Info("schema: local YANG files loaded", "count", loaded, "yang_dir", dir)
-	}
+	return last
 }
 
 func (s *session) loadSchema() {
 	s.schema = newSchemaNode()
-
-	// 0. Load local .yang files first — gives correct structure for modules
-	//    the NE doesn't expose via get-schema (e.g. proprietary ConfD modules).
-	s.loadSchemaFromDir()
 
 	// 1. Try loading YANG modules via get-schema (RFC 6022)
 	modules := s.nc.ExtractModules()
@@ -379,39 +355,67 @@ func (s *session) loadSchema() {
 
 	// 2. Merge with running config to capture runtime-only nodes.
 	//
-	// When YANG loaded successfully (schema has children), we only add top-level
-	// containers that YANG didn't describe.  This prevents the XML config from
-	// corrupting the YANG-derived deep structure: ConfD may omit intermediate
-	// containers (e.g. "vsmf") from the XML when none of their direct leaves are
-	// explicitly set, which would cause parseSchemaFromXML to place grandchildren
-	// (e.g. "qosConf") one level too high relative to the YANG schema.
+	// For top-level containers not in YANG schema, we first try to fetch their
+	// YANG module via get-schema using the XML namespace (e.g. namespace
+	// "urn:5gc:smf-config" → try module name "smf-config"). This handles the
+	// common ConfD case where proprietary modules are not advertised in
+	// capabilities but ARE reachable via get-schema and their namespace is
+	// visible in the running-config XML.
 	//
-	// When YANG loading failed entirely, fall back to full XML-based schema.
+	// Only if get-schema also fails do we fall back to the XML-derived structure
+	// (which may be flat/incorrect due to ConfD omitting intermediate containers
+	// whose leaves all use default values).
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	reply, err := s.nc.GetConfig(ctx, "running", "")
-	if err == nil {
+	if err != nil {
+		slog.Warn("schema: get-config failed, using YANG-only schema", "error", err)
+	} else {
 		configSchema := parseSchemaFromXML(reply)
 		slog.Info("schema: XML running-config top_elements", "elements", configSchema.childNames())
-		if len(s.schema.children) == 0 {
-			// No YANG available — use XML as the sole schema source.
-			slog.Warn("schema: no YANG loaded, falling back to XML-only schema (tab completion may show wrong structure for ConfD-omitted intermediate containers)")
-			mergeSchema(s.schema, configSchema)
-		} else {
-			// YANG is loaded — only add top-level containers not already known.
-			var added, skipped []string
-			for name, xmlNode := range configSchema.children {
-				if _, exists := s.schema.children[name]; !exists {
-					s.schema.children[name] = xmlNode
-					added = append(added, name)
+
+		var addedYang, addedXML, skipped []string
+		for name, xmlNode := range configSchema.children {
+			if _, exists := s.schema.children[name]; exists {
+				skipped = append(skipped, name)
+				continue
+			}
+			// Not in YANG schema — try to fetch YANG via namespace.
+			ns := xmlNode.namespace
+			modName := moduleNameFromNamespace(ns)
+			yangLoaded := false
+			if modName != "" {
+				slog.Info("schema: trying get-schema for XML-only container",
+					"container", name, "namespace", ns, "guessed_module", modName)
+				ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+				yangReply, yangErr := s.nc.GetSchema(ctx2, modName)
+				cancel2()
+				if yangErr == nil {
+					yangText := extractSchemaText(yangReply)
+					if yangText != "" {
+						parsed := parseSchemaFromYANG(yangText, ns)
+						mergeSchema(s.schema, parsed)
+						slog.Info("schema: YANG loaded via namespace probe",
+							"module", modName, "top_elements", parsed.childNames())
+						addedYang = append(addedYang, name)
+						yangLoaded = true
+					}
 				} else {
-					skipped = append(skipped, name)
+					slog.Info("schema: namespace probe get-schema failed",
+						"module", modName, "error", yangErr)
 				}
 			}
-			slog.Info("schema: XML merge complete", "added_from_xml", added, "kept_from_yang", skipped)
+			if !yangLoaded {
+				// Last resort: use the XML-derived node (may have wrong depth).
+				s.schema.children[name] = xmlNode
+				addedXML = append(addedXML, name)
+			}
 		}
-	} else {
-		slog.Warn("schema: get-config failed, using YANG-only schema", "error", err)
+		slog.Info("schema: merge complete",
+			"added_via_yang_probe", addedYang,
+			"added_via_xml_fallback", addedXML,
+			"kept_from_yang", skipped,
+		)
 	}
 
 	slog.Info("schema ready", "top_elements", s.schema.childNames())
