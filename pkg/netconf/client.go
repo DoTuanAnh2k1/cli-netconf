@@ -105,15 +105,13 @@ func DialTCP(ctx context.Context, host string, port int) (*Client, error) {
 		return nil, fmt.Errorf("tcp dial %s: %w", addr, err)
 	}
 
-	rw := conn.(io.ReadWriter)
+	// net.Conn implements both io.Reader and io.Writer directly.
+	// Use connWriter to satisfy io.WriteCloser without closing the underlying conn here.
 	c := &Client{
 		tcpConn: conn,
-		stdin:   io.NopCloser(rw).(io.WriteCloser),
-		stdout:  rw,
+		stdin:   &connWriter{conn},
+		stdout:  conn,
 	}
-
-	// stdin must be a WriteCloser — wrap net.Conn since it does not expose separate pipes
-	c.stdin = &connWriter{conn}
 
 	if err := c.exchangeHello(ctx); err != nil {
 		conn.Close()
