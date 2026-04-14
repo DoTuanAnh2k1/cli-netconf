@@ -37,7 +37,7 @@
 #include <string.h>
 #include <signal.h>
 #include <sys/time.h>
-#include <confd_lib.h>  /* CONFD_RUNNING, CONFD_CANDIDATE */
+#include "confd_compat.h"
 #include <readline/readline.h>
 #include <readline/history.h>
 #include "cli.h"
