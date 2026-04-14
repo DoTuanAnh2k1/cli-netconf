@@ -2,15 +2,19 @@
 # Makefile — CLI NETCONF (C / MAAPI)
 #
 # Requirements:
-#   libxml2   (brew install libxml2  /  apt install libxml2-dev)
-#   readline  (brew install readline /  apt install libreadline-dev)
-#   libconfd  — set CONFD_DIR=/path/to/confd
+#   libxml2   (brew install libxml2  /  dnf install libxml2-devel)
+#   readline  (brew install readline /  dnf install readline-devel)
+#   libconfd  — headers + .so từ ConfD SDK
 #
-# Build:
+# Build (flexible):
+#   # Nếu có đủ CONFD_DIR với include/ và lib/ bên trong:
 #   make CONFD_DIR=/opt/confd
 #
-# Run:
-#   CONFD_IPC_ADDR=<host> CONFD_IPC_PORT=4565 ./cli-netconf
+#   # Nếu chỉ có 2 file header + libconfd.so riêng lẻ:
+#   make CONFD_INCLUDE=./include CONFD_LIB=/path/to/libconfd.so
+#
+#   # Header để trong include/, .so để trong project:
+#   make CONFD_INCLUDE=./include CONFD_LIB=./libconfd.so
 # ============================================================
 
 CC     := gcc
@@ -24,6 +28,29 @@ SRCS := $(SRCDIR)/main.c       \
         $(SRCDIR)/maapi.c      \
         $(SRCDIR)/schema.c     \
         $(SRCDIR)/formatter.c
+
+# ----- ConfD: hỗ trợ 2 cách chỉ định -----
+ifdef CONFD_DIR
+    CONFD_INCLUDE_DIR := $(CONFD_DIR)/include
+    CONFD_LIB_DIR     := $(CONFD_DIR)/lib
+    CONFD_LDFLAGS     := -L$(CONFD_LIB_DIR) -lconfd
+else ifdef CONFD_INCLUDE
+    # CONFD_INCLUDE = thư mục chứa confd_lib.h
+    # CONFD_LIB    = path đến libconfd.so (hoặc thư mục chứa nó)
+    CONFD_INCLUDE_DIR := $(CONFD_INCLUDE)
+    ifdef CONFD_LIB
+        # Nếu CONFD_LIB là file .so trực tiếp
+        ifneq ($(suffix $(CONFD_LIB)),.so)
+            CONFD_LDFLAGS := -L$(CONFD_LIB) -lconfd
+        else
+            CONFD_LDFLAGS := $(CONFD_LIB)
+        endif
+    else
+        CONFD_LDFLAGS := -lconfd
+    endif
+else
+    $(error "Cần chỉ định CONFD_DIR hoặc CONFD_INCLUDE. Ví dụ:\n  make CONFD_DIR=/opt/confd\n  make CONFD_INCLUDE=./include CONFD_LIB=./libconfd.so")
+endif
 
 # ----- Platform detection -----
 UNAME := $(shell uname -s)
@@ -41,17 +68,11 @@ else
     RL_LDFLAGS   := -lreadline
 endif
 
-# ----- MAAPI (libconfd) — required -----
-ifndef CONFD_DIR
-    $(error "CONFD_DIR is required. Usage: make CONFD_DIR=/path/to/confd")
-endif
-
 CFLAGS  := -Wall -Wextra -O2 -std=c11 -D_GNU_SOURCE -DWITH_MAAPI \
-           -I$(INCDIR) -I$(CONFD_DIR)/include \
+           -I$(INCDIR) -I$(CONFD_INCLUDE_DIR) \
            $(XML2_CFLAGS) $(RL_CFLAGS)
 
-LDFLAGS := $(RL_LDFLAGS) $(XML2_LDFLAGS) \
-           -L$(CONFD_DIR)/lib -lconfd
+LDFLAGS := $(RL_LDFLAGS) $(XML2_LDFLAGS) $(CONFD_LDFLAGS)
 
 OBJS := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o, $(SRCS))
 
