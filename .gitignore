@@ -1,12 +1,21 @@
-bin/
-host_key
-host_key.pub
-*.exe
-.claude/*
-cli-netconf
+# Go binaries
+go/bin/
+go/host_key
+go/host_key.pub
+
+# Root-level compiled artifacts (old)
+/bin/
+/cli-netconf
 /mock-mgt
 /mock-netconf
-config.yang
+/direct
+/netconf
+/config.yang
+
+# C build artifacts
 c/obj/
 c/cli-netconf-c
-netconf
+
+# General
+*.exe
+.claude/*

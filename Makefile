@@ -1,21 +1,42 @@
-APP := cli-netconf
+# ============================================================
+# Root Makefile — CLI NETCONF
+#
+# Hai implementation:
+#   go/   — Go implementation (SSH server + direct mode)
+#   c/    — C implementation  (direct mode, MAAPI optional)
+# ============================================================
 
-.PHONY: build run clean docker-build test
+.PHONY: all build-go build-c clean-go clean-c clean test-go run-go run-c
 
-build:
-	go build -o bin/$(APP) .
+all: build-go build-c
 
-run: build
-	./bin/$(APP)
+# ---- Go ----
 
-clean:
-	rm -rf bin/
+build-go:
+	$(MAKE) -C go build-all
 
-docker-build:
-	docker build -t $(APP) .
+clean-go:
+	$(MAKE) -C go clean
 
-test:
-	go test -v -timeout 300s ./test/
+test-go:
+	$(MAKE) -C go test
 
-generate-host-key:
-	ssh-keygen -t ed25519 -f host_key -N ""
+run-go:
+	$(MAKE) -C go run-direct
+
+# ---- C ----
+
+build-c:
+	$(MAKE) -C c
+
+clean-c:
+	$(MAKE) -C c clean
+
+run-c:
+	$(MAKE) -C c run-tcp
+
+# ---- Combined ----
+
+clean: clean-go clean-c
+
+test: test-go

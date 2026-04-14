@@ -23,7 +23,7 @@ trap cleanup EXIT
 cd "$PROJECT_DIR"
 
 echo -e "${CYAN}Building all binaries...${RESET}"
-go build -o bin/cli-netconf      ./cmd/cli-netconf
+go build -o bin/cli-netconf      ./cmd/netconf
 go build -o bin/mock-mgt         ./test/mock-mgt
 go build -o bin/mock-netconf     ./test/mock-netconf
 
