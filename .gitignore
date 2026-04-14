@@ -1,20 +1,16 @@
-# Go binaries
-go/bin/
-go/host_key
-go/host_key.pub
-
-# Root-level compiled artifacts (old)
-/bin/
+# Build artifacts
+/obj/
 /cli-netconf
+
+# Leftover build artifacts and binaries
+/bin/
+/c/
+/go/
 /mock-mgt
 /mock-netconf
-/direct
 /netconf
+/direct
 /config.yang
-
-# C build artifacts
-c/obj/
-c/cli-netconf-c
 
 # General
 *.exe
