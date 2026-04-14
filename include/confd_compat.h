@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,12 +47,14 @@ extern "C" {
 #define CONFD_PROTO_EXTERNAL 8
 
 /* ─── MAAPI save/load config flags ───────────────────────── */
-#define MAAPI_CONFIG_XML           1
-#define MAAPI_CONFIG_WITH_DEFAULTS 2
-#define MAAPI_CONFIG_MERGE         8
+#define MAAPI_CONFIG_XML            (1 << 0)
+#define MAAPI_CONFIG_WITH_DEFAULTS  (1 << 3)
+#define MAAPI_CONFIG_SHOW_DEFAULTS  (1 << 4)
+#define MAAPI_CONFIG_MERGE          (1 << 5)
 
 /* ─── cs_node flags ──────────────────────────────────────── */
-#define CS_NODE_IS_LIST (1 << 0)
+#define CS_NODE_IS_LIST      (1 << 0)
+#define CS_NODE_IS_CONTAINER (1 << 8)
 
 /* ─── Value types ────────────────────────────────────────── */
 enum confd_vtype {
@@ -106,7 +109,7 @@ struct confd_value {
         uint64_t            u64;
         double              dbl;
         struct confd_buf_t  buf;
-        uint8_t             _raw[24]; /* padding to match .so ABI */
+        uint8_t             _raw[32]; /* padding to match .so ABI (sizeof=40) */
     } val;
 };
 typedef struct confd_value confd_value_t;
@@ -118,26 +121,35 @@ typedef struct confd_value confd_value_t;
         (V)->val.buf.size = (int)strlen(S);                     \
     } while (0)
 
-/* ─── Namespace info ─────────────────────────────────────── */
+/* ─── Namespace info (must match confd_lib.h layout) ─────── */
 struct confd_nsinfo {
-    uint32_t    hash;
-    const char *prefix;
     const char *uri;
+    const char *prefix;
+    uint32_t    hash;
     const char *revision;
+    const char *module;
 };
 
 /* ─── Schema tree (cs_node) ──────────────────────────────── */
 /*
- * Minimal cs_node_info — only the fields we read.
- * Layout must match libconfd.so; adjust if schema walk crashes.
+ * cs_node_info — must match libconfd.so layout exactly.
+ * Based on confd_lib.h from ConfD 7.3 SDK.
  */
+struct confd_type; /* forward decl (opaque) */
+struct confd_cs_choice; /* forward decl (opaque) */
+struct confd_cs_meta_data; /* forward decl (opaque) */
+
 struct confd_cs_node_info {
-    uint32_t type;      /* enum confd_vtype */
-    uint32_t flags;     /* CS_NODE_IS_LIST, etc. */
-    uint32_t minOccurs;
-    uint32_t maxOccurs;
-    void    *keys;      /* key list pointer (unused) */
-    void    *choices;
+    uint32_t      *keys;
+    int            minOccurs;
+    int            maxOccurs;
+    uint32_t       shallow_type;   /* enum confd_vtype */
+    struct confd_type *type;
+    confd_value_t *defval;
+    struct confd_cs_choice *choices;
+    int            flags;
+    uint8_t        cmp;
+    struct confd_cs_meta_data *meta_data;
 };
 
 struct confd_cs_node {
@@ -147,14 +159,49 @@ struct confd_cs_node {
     struct confd_cs_node  *parent;
     struct confd_cs_node  *children;
     struct confd_cs_node  *next;
+    void                  *opaque;
 };
 
 /* ─── confd_lib functions ────────────────────────────────── */
-void        confd_init(const char *name, FILE *estream, int debug_level);
+
+/*
+ * confd_init — the .so exports confd_init_vsn(name, estream, debug, sz, ver)
+ * We wrap it as a macro so existing code calling confd_init(name,stream,level) works.
+ */
+/*
+ * confd_init_vsn_sz(name, estream, debug, api_vsn, maxdepth, maxkeylen)
+ * — the real signature from confd_lib.h.
+ * CONFD_LIB_API_VSN = 0x07030000 (ConfD 7.3)
+ * MAXDEPTH = 20, MAXKEYLEN = 9 (default ConfD constants)
+ */
+#define CONFD_LIB_API_VSN 0x07030000
+#ifndef MAXDEPTH
+#define MAXDEPTH  20
+#endif
+#ifndef MAXKEYLEN
+#define MAXKEYLEN 9
+#endif
+
+void confd_init_vsn_sz(const char *name, FILE *estream, int debug_level,
+                       int api_vsn, int maxdepth, int maxkeylen);
+#define confd_init(name, estream, debug) \
+    confd_init_vsn_sz((name), (estream), (debug), \
+                      CONFD_LIB_API_VSN, MAXDEPTH, MAXKEYLEN)
+
+int         confd_load_schemas(const struct sockaddr *srv, int srv_sz);
 const char *confd_lasterr(void);
 const char *confd_hash2str(uint32_t hash);
 int         confd_get_nslist(struct confd_nsinfo **listp);
 struct confd_cs_node *confd_find_cs_root(uint32_t ns);
+
+/* ─── confd_ip (needed for maapi_start_user_session) ─────── */
+struct confd_ip {
+    int af;    /* AF_INET | AF_INET6 */
+    union {
+        struct in_addr  v4;
+        struct in6_addr v6;
+    } ip;
+};
 
 /* ─── MAAPI functions ────────────────────────────────────── */
 
@@ -162,22 +209,51 @@ struct confd_cs_node *confd_find_cs_root(uint32_t ns);
 int maapi_connect(int sock, struct sockaddr *srv, int srv_sz);
 
 /*
- * Start user session.
- * proto: CONFD_PROTO_TCP (2) or CONFD_PROTO_EXTERNAL (8)
+ * maapi_start_user_session3 — 12 params in ConfD 7.3:
+ *   (sock, user, ctx, groups, ngrps, src_addr, src_port, proto,
+ *    vendor, product, version, client_id)
  */
-int maapi_start_user_session(int sock,
+int maapi_start_user_session3(int sock,
                               const char  *username,
                               const char  *context,
                               const char **groups,
                               int          num_groups,
-                              int          proto);
+                              const struct confd_ip *src_addr,
+                              int          src_port,
+                              int          proto,
+                              const char  *vendor,
+                              const char  *product,
+                              const char  *version,
+                              const char  *client_id);
+
+/* Wrapper: src_addr=NULL may segfault in some ConfD versions,
+ * so we pass a zeroed-out localhost address */
+static inline int _maapi_start_session_compat(
+    int sock, const char *user, const char *ctx,
+    const char **grps, int ngrps, int proto) {
+    struct confd_ip src = {0};
+    src.af = AF_INET; /* 0.0.0.0 */
+    return maapi_start_user_session3(sock, user, ctx, grps, ngrps,
+                                     &src, 0, proto,
+                                     NULL, NULL, NULL, NULL);
+}
+#define maapi_start_user_session(sock, user, ctx, grps, ngrps, proto) \
+    _maapi_start_session_compat((sock), (user), (ctx), (grps), (ngrps), (proto))
 int maapi_end_user_session(int sock);
 
 /*
- * Start transaction — returns th handle (>= 0) on success, CONFD_ERR on fail.
- * rw: CONFD_READ or CONFD_READ_WRITE
+ * maapi_start_trans_flags2 — 9 params in ConfD 7.3:
+ *   (sock, db, rw, usid, flags, vendor, product, version, client_id)
  */
-int maapi_start_trans(int sock, int dbname, int rw);
+int maapi_start_trans_flags2(int sock, int dbname, int rw,
+                             int usid, int flags,
+                             const char *vendor,
+                             const char *product,
+                             const char *version,
+                             const char *client_id);
+#define maapi_start_trans(sock, dbname, rw) \
+    maapi_start_trans_flags2((sock), (dbname), (rw), 0, 0, \
+                             NULL, NULL, NULL, NULL)
 
 /* Close/finish a transaction (no commit) */
 int maapi_finish_trans(int sock, int thandle);
@@ -193,10 +269,15 @@ int maapi_lock(int sock, int dbname);
 int maapi_unlock(int sock, int dbname);
 
 /*
- * Save config from a transaction to a file descriptor (XML).
+ * Save config from a transaction to a file (XML).
  * flags: MAAPI_CONFIG_XML | MAAPI_CONFIG_WITH_DEFAULTS
+ * fmtpath: printf-style path format, e.g. "%s" with file path arg.
  */
-int maapi_save_config(int sock, int thandle, int flags, int fd);
+int maapi_save_config(int sock, int thandle, int flags,
+                      const char *fmtpath, ...);
+int maapi_save_config_result(int sock, int id);
+int confd_stream_connect(int sock, const struct sockaddr *srv,
+                         int srv_sz, int id, int flags);
 
 /*
  * Load config from a file into a write transaction.

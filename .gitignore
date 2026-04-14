@@ -1,6 +1,5 @@
 # Build artifacts
 /obj/
-/cli-netconf
 
 # Leftover build artifacts and binaries
 /bin/

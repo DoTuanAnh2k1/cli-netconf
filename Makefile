@@ -39,10 +39,19 @@ endif
 
 # Nếu CONFD_LIB là file .so → link trực tiếp
 # Nếu CONFD_LIB là thư mục  → -L dir -lconfd
+CONFD_DIR := $(dir $(CONFD_LIB))
 ifneq ($(suffix $(CONFD_LIB)),.so)
     CONFD_LDFLAGS := -L$(CONFD_LIB) -lconfd
 else
     CONFD_LDFLAGS := $(CONFD_LIB)
+endif
+
+# libconfd.so cần libcrypto — tìm cùng thư mục với CONFD_LIB
+CRYPTO_SO := $(wildcard $(CONFD_DIR)libcrypto-server.so $(CONFD_DIR)libcrypto.so.1.0.0 $(CONFD_DIR)libcrypto.so.10)
+ifneq ($(CRYPTO_SO),)
+    CONFD_LDFLAGS += $(firstword $(CRYPTO_SO)) -Wl,-rpath,$(CONFD_DIR)
+else
+    CONFD_LDFLAGS += -Wl,-rpath,$(CONFD_DIR)
 endif
 
 # ----- Platform detection -----
