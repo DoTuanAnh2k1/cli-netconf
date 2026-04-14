@@ -404,6 +404,7 @@ static void cmd_validate(cli_session_t *s) {
     }
     free(reply);
     print_elapsed(ms);
+    auth_save_history(s, "validate", ms);
 }
 
 /* -------------------------------------------------------------------------
@@ -411,12 +412,15 @@ static void cmd_validate(cli_session_t *s) {
  * ---------------------------------------------------------------------- */
 static void cmd_discard(cli_session_t *s) {
     if (!require_connection(s)) return;
+    struct timeval t0; gettimeofday(&t0, NULL);
     char *reply = nc_discard(s->nc);
+    long ms = elapsed_ms(&t0);
     if (!reply) { print_err("discard failed"); return; }
     if (fmt_is_rpc_ok(reply))
         printf("%sChanges discarded.%s\n", COLOR_GREEN, COLOR_RESET);
     else printf("%s\n", reply);
     free(reply);
+    auth_save_history(s, "discard", ms);
 }
 
 /* -------------------------------------------------------------------------
@@ -425,7 +429,9 @@ static void cmd_discard(cli_session_t *s) {
 static void cmd_lock(cli_session_t *s, char **args, int argc) {
     if (!require_connection(s)) return;
     const char *ds = (argc > 0) ? args[0] : "candidate";
+    struct timeval t0; gettimeofday(&t0, NULL);
     char *reply = nc_lock(s->nc, ds);
+    long ms = elapsed_ms(&t0);
     if (!reply) { print_err("lock failed"); return; }
     if (fmt_is_rpc_ok(reply))
         printf("%sLocked %s.%s\n", COLOR_GREEN, ds, COLOR_RESET);
@@ -435,16 +441,20 @@ static void cmd_lock(cli_session_t *s, char **args, int argc) {
         free(msg);
     }
     free(reply);
+    auth_save_history(s, "lock", ms);
 }
 
 static void cmd_unlock(cli_session_t *s, char **args, int argc) {
     if (!require_connection(s)) return;
     const char *ds = (argc > 0) ? args[0] : "candidate";
+    struct timeval t0; gettimeofday(&t0, NULL);
     char *reply = nc_unlock(s->nc, ds);
+    long ms = elapsed_ms(&t0);
     if (!reply) { print_err("unlock failed"); return; }
     if (fmt_is_rpc_ok(reply))
         printf("%sUnlocked %s.%s\n", COLOR_GREEN, ds, COLOR_RESET);
     free(reply);
+    auth_save_history(s, "unlock", ms);
 }
 
 /* -------------------------------------------------------------------------
@@ -453,18 +463,32 @@ static void cmd_unlock(cli_session_t *s, char **args, int argc) {
 static void cmd_dump(cli_session_t *s, char **args, int argc) {
     if (!require_connection(s)) return;
     if (argc == 0) {
-        printf("Usage: dump text [filename]\n");
-        printf("       dump xml  [filename]\n");
+        printf("Usage: dump text|xml [running|candidate] [filename]\n");
         return;
     }
-    const char *format = args[0];
+
+    /* dump <format> [running|candidate] [file] */
+    const char *format    = args[0];
+    const char *datastore = "running";
+    const char *filename  = NULL;
+
     if (strcasecmp(format, "text") != 0 && strcasecmp(format, "xml") != 0) {
         print_err("Format must be 'text' or 'xml'");
         return;
     }
 
+    int next = 1;
+    if (argc > next &&
+        (strcasecmp(args[next], "running")   == 0 ||
+         strcasecmp(args[next], "candidate") == 0)) {
+        datastore = args[next++];
+    }
+    if (argc > next) {
+        filename = args[next];
+    }
+
     struct timeval t0; gettimeofday(&t0, NULL);
-    char *reply = nc_get_config(s->nc, "running", "");
+    char *reply = nc_get_config(s->nc, datastore, "");
     long ms = elapsed_ms(&t0);
     if (!reply) { print_err("get-config failed"); return; }
 
@@ -475,21 +499,24 @@ static void cmd_dump(cli_session_t *s, char **args, int argc) {
         content = fmt_extract_data_xml(reply);
     }
     free(reply);
+    if (!content) { print_err("empty config"); return; }
 
-    if (argc >= 2) {
-        /* Write to file */
-        FILE *f = fopen(args[1], "w");
+    if (filename) {
+        FILE *f = fopen(filename, "w");
         if (!f) { print_err("Cannot open file"); free(content); return; }
         fwrite(content, 1, strlen(content), f);
         fclose(f);
         printf("%sSaved to %s (%zu bytes)%s\n",
-               COLOR_GREEN, args[1], content ? strlen(content) : 0, COLOR_RESET);
+               COLOR_GREEN, filename, strlen(content), COLOR_RESET);
     } else {
-        printf("%s", content ? content : "");
+        paged_print(content);
     }
     free(content);
     print_elapsed(ms);
-    auth_save_history(s, "dump", ms);
+
+    char hist_cmd[32];
+    snprintf(hist_cmd, sizeof(hist_cmd), "dump-%s-%s", format, datastore);
+    auth_save_history(s, hist_cmd, ms);
 }
 
 /* -------------------------------------------------------------------------

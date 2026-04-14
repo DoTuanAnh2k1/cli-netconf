@@ -101,6 +101,7 @@ static char *http_request(cli_session_t *s, const char *method,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
 
     if (strcmp(method, "POST") == 0) {
@@ -122,6 +123,57 @@ static char *http_request(cli_session_t *s, const char *method,
         return NULL;
     }
     return resp.data; /* caller free */
+}
+
+/* -------------------------------------------------------------------------
+ * http_fire_forget — POST fire-and-forget, timeout 3s, log lỗi, không crash
+ * Dùng cho history/backup — không cần biết kết quả.
+ * ---------------------------------------------------------------------- */
+static void http_fire_forget(cli_session_t *s, const char *path,
+                             const char *body) {
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        fprintf(stderr, "[mgt] curl_easy_init failed, skip %s\n", path);
+        return;
+    }
+
+    char url[MAX_URL_LEN * 2];
+    snprintf(url, sizeof(url), "%s%s", s->mgt_url, path);
+
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    if (s->token[0]) {
+        char auth[MAX_TOKEN_LEN + 32];
+        snprintf(auth, sizeof(auth), "Authorization: Bearer %s", s->token);
+        headers = curl_slist_append(headers, auth);
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb); /* discard body */
+    curl_buf_t discard = {NULL, 0};
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &discard);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);  /* fail fast */
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "{}");
+
+    CURLcode rc = curl_easy_perform(curl);
+    if (rc != CURLE_OK) {
+        fprintf(stderr, "[mgt] %s failed: %s (skipped)\n",
+                path, curl_easy_strerror(rc));
+    } else {
+        long code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+        if (code != 200 && code != 201 && code != 204) {
+            fprintf(stderr, "[mgt] %s returned HTTP %ld (skipped)\n",
+                    path, code);
+        }
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    free(discard.data);
 }
 
 /* -------------------------------------------------------------------------
@@ -222,7 +274,7 @@ bool auth_list_ne(cli_session_t *s) {
  * auth_save_history — POST /aa/history/save  (fire-and-forget)
  * ---------------------------------------------------------------------- */
 void auth_save_history(cli_session_t *s, const char *cmd, long ms) {
-    if (!s->token[0] || !s->current_ne) return;
+    if (!s->token[0] || !s->current_ne) return;  /* direct mode → skip */
 
     char body[MAX_LINE_LEN];
     snprintf(body, sizeof(body),
@@ -231,8 +283,7 @@ void auth_save_history(cli_session_t *s, const char *cmd, long ms) {
         "\"time_to_complete\":%ld}",
         cmd, s->current_ne->name, s->current_ne->ip, ms);
 
-    char *resp = http_request(s, "POST", "/aa/history/save", body, NULL);
-    free(resp);
+    http_fire_forget(s, "/aa/history/save", body);
 }
 
 /* -------------------------------------------------------------------------
@@ -268,7 +319,11 @@ bool auth_save_backup(cli_session_t *s, const char *config_xml,
     char *resp = http_request(s, "POST", "/aa/backup/save", body, &code);
     free(body);
 
-    if (!resp || code != 200) { free(resp); return false; }
+    if (!resp || (code != 200 && code != 201)) {
+        fprintf(stderr, "[mgt] backup/save failed (HTTP %ld) — skipped\n", code);
+        free(resp);
+        return false;
+    }
 
     char *id_str = json_get_str(resp, "id");
     free(resp);

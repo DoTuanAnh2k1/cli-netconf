@@ -29,11 +29,17 @@ run-go:
 build-c:
 	$(MAKE) -C c
 
+build-c-direct:
+	$(MAKE) -C c direct
+
 clean-c:
 	$(MAKE) -C c clean
 
 run-c:
 	$(MAKE) -C c run-tcp
+
+run-c-direct:
+	$(MAKE) -C c run-direct
 
 docker-build-c:
 	$(MAKE) -C c docker-build

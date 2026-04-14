@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include "cli.h"
@@ -32,26 +33,39 @@ static const char *SHOW_SUBCMDS[] = {
 };
 
 /* -------------------------------------------------------------------------
- * Match helper — tìm entries trong list có prefix là text
+ * prepend_prefix — readline yêu cầu matches[0] là common prefix của tất cả
+ * completions. Hàm này nhận mảng {str1, str2, ..., NULL} (n phần tử),
+ * tính prefix, trả về mảng mới {prefix, str1, str2, ..., NULL}.
+ * Caller free mảng cũ (chỉ free wrapper, không free strings).
  * ---------------------------------------------------------------------- */
-typedef struct {
-    const char **list;     /* NULL-terminated static list */
-    char       **dyn_list; /* dynamic list từ schema */
-    int          dyn_count;
-    int          idx;
-    const char  *text;
-} match_state_t;
+static char **prepend_prefix(char **list, int n) {
+    if (!list || n == 0) return list;
 
-static char *match_from_list(const char **list, const char *text,
-                              int state, int *s_idx) {
-    if (state == 0) *s_idx = 0;
-    size_t len = strlen(text);
-    while (list[*s_idx]) {
-        const char *entry = list[(*s_idx)++];
-        if (strncasecmp(entry, text, len) == 0)
-            return strdup(entry);
+    /* Tính longest common prefix (case-insensitive) */
+    size_t plen = strlen(list[0]);
+    for (int i = 1; i < n && plen > 0; i++) {
+        size_t j = 0;
+        while (j < plen && list[i][j] &&
+               tolower((unsigned char)list[0][j]) ==
+               tolower((unsigned char)list[i][j]))
+            j++;
+        plen = j;
     }
-    return NULL;
+
+    char *prefix = malloc(plen + 1);
+    if (!prefix) return list;
+    memcpy(prefix, list[0], plen);
+    prefix[plen] = '\0';
+
+    /* Tạo mảng mới: [prefix, list[0], list[1], ..., NULL] */
+    char **result = calloc((size_t)(n + 2), sizeof(char *));
+    if (!result) { free(prefix); return list; }
+    result[0] = prefix;
+    for (int i = 0; i < n; i++) result[i + 1] = list[i];
+    result[n + 1] = NULL;
+
+    free(list); /* free wrapper cũ (strings đã chuyển sang result) */
+    return result;
 }
 
 /* -------------------------------------------------------------------------
@@ -81,15 +95,15 @@ static char **schema_path_completions(const char **path_args, int path_count,
     }
     if (match_count == 0) return NULL;
 
-    char **matches = calloc(match_count + 1, sizeof(char *));
-    if (!matches) return NULL;
+    char **m = calloc((size_t)(match_count + 1), sizeof(char *));
+    if (!m) return NULL;
 
     int i = 0;
     for (schema_node_t *c = node->children; c; c = c->next) {
         if (strncasecmp(c->name, word, word_len) == 0)
-            matches[i++] = strdup(c->name);
+            m[i++] = strdup(c->name);
     }
-    return matches;
+    return prepend_prefix(m, match_count);
 }
 
 /* -------------------------------------------------------------------------
@@ -121,11 +135,12 @@ static char **cli_completer(const char *text, int start, int end) {
         for (int i = 0; cmds[i]; i++)
             if (strncasecmp(cmds[i], text, len) == 0) n++;
         if (n > 0) {
-            matches = calloc(n + 1, sizeof(char *));
+            char **m = calloc((size_t)(n + 1), sizeof(char *));
             int j = 0;
             for (int i = 0; cmds[i]; i++)
                 if (strncasecmp(cmds[i], text, len) == 0)
-                    matches[j++] = strdup(cmds[i]);
+                    m[j++] = strdup(cmds[i]);
+            matches = prepend_prefix(m, n);
         }
         goto done;
     }
@@ -142,11 +157,12 @@ static char **cli_completer(const char *text, int start, int end) {
                 for (int i = 0; SHOW_SUBCMDS[i]; i++)
                     if (strncasecmp(SHOW_SUBCMDS[i], text, len) == 0) n++;
                 if (n > 0) {
-                    matches = calloc(n + 1, sizeof(char *));
+                    char **m = calloc((size_t)(n + 1), sizeof(char *));
                     int j = 0;
                     for (int i = 0; SHOW_SUBCMDS[i]; i++)
                         if (strncasecmp(SHOW_SUBCMDS[i], text, len) == 0)
-                            matches[j++] = strdup(SHOW_SUBCMDS[i]);
+                            m[j++] = strdup(SHOW_SUBCMDS[i]);
+                    matches = prepend_prefix(m, n);
                 }
                 goto done;
             }
@@ -174,11 +190,12 @@ static char **cli_completer(const char *text, int start, int end) {
                     for (int i = 0; SHOW_SUBCMDS[i]; i++)
                         if (strncasecmp(SHOW_SUBCMDS[i], text, len) == 0) n++;
                     if (n > 0) {
-                        matches = calloc(n + 1, sizeof(char *));
+                        char **m = calloc((size_t)(n + 1), sizeof(char *));
                         int j = 0;
                         for (int i = 0; SHOW_SUBCMDS[i]; i++)
                             if (strncasecmp(SHOW_SUBCMDS[i], text, len) == 0)
-                                matches[j++] = strdup(SHOW_SUBCMDS[i]);
+                                m[j++] = strdup(SHOW_SUBCMDS[i]);
+                        matches = prepend_prefix(m, n);
                     }
                 }
             }
@@ -199,16 +216,15 @@ static char **cli_completer(const char *text, int start, int end) {
             if (!s) goto done;
             size_t len = strlen(text);
             int n = 0;
-            for (int i = 0; i < s->ne_count; i++) {
+            for (int i = 0; i < s->ne_count; i++)
                 if (strncasecmp(s->nes[i].name, text, len) == 0) n++;
-            }
             if (n > 0) {
-                matches = calloc(n + 2, sizeof(char *));
+                char **m = calloc((size_t)(n + 1), sizeof(char *));
                 int j = 0;
-                for (int i = 0; i < s->ne_count; i++) {
+                for (int i = 0; i < s->ne_count; i++)
                     if (strncasecmp(s->nes[i].name, text, len) == 0)
-                        matches[j++] = strdup(s->nes[i].name);
-                }
+                        m[j++] = strdup(s->nes[i].name);
+                matches = prepend_prefix(m, n);
             }
         }
 
@@ -220,11 +236,12 @@ static char **cli_completer(const char *text, int start, int end) {
                 for (int i = 0; fmts[i]; i++)
                     if (strncasecmp(fmts[i], text, len) == 0) n++;
                 if (n > 0) {
-                    matches = calloc(n + 1, sizeof(char *));
+                    char **m = calloc((size_t)(n + 1), sizeof(char *));
                     int j = 0;
                     for (int i = 0; fmts[i]; i++)
                         if (strncasecmp(fmts[i], text, len) == 0)
-                            matches[j++] = strdup(fmts[i]);
+                            m[j++] = strdup(fmts[i]);
+                    matches = prepend_prefix(m, n);
                 }
             }
         }
@@ -237,11 +254,12 @@ static char **cli_completer(const char *text, int start, int end) {
             for (int i = 0; ds[i]; i++)
                 if (strncasecmp(ds[i], text, len) == 0) n++;
             if (n > 0) {
-                matches = calloc(n + 1, sizeof(char *));
+                char **m = calloc((size_t)(n + 1), sizeof(char *));
                 int j = 0;
                 for (int i = 0; ds[i]; i++)
                     if (strncasecmp(ds[i], text, len) == 0)
-                        matches[j++] = strdup(ds[i]);
+                        m[j++] = strdup(ds[i]);
+                matches = prepend_prefix(m, n);
             }
         }
 
@@ -255,14 +273,15 @@ static char **cli_completer(const char *text, int start, int end) {
                 if (strncmp(id_str, text, len) == 0) n++;
             }
             if (n > 0) {
-                matches = calloc(n + 1, sizeof(char *));
+                char **m = calloc((size_t)(n + 1), sizeof(char *));
                 int j = 0;
                 for (int i = 0; i < s->backup_count; i++) {
                     char id_str[16];
                     snprintf(id_str, sizeof(id_str), "%d", s->backups[i].id);
                     if (strncmp(id_str, text, len) == 0)
-                        matches[j++] = strdup(id_str);
+                        m[j++] = strdup(id_str);
                 }
+                matches = prepend_prefix(m, n);
             }
         }
     }

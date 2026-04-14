@@ -12,7 +12,9 @@
 # ============================================================
 
 CC      := gcc
-TARGET  := cli-netconf-c
+TARGET        := cli-netconf-c
+TARGET_DIRECT := cli-netconf-c-direct
+TARGET_MAAPI  := cli-netconf-c-maapi
 SRCDIR  := src
 INCDIR  := include
 OBJDIR  := obj
@@ -24,6 +26,36 @@ SRCS := $(SRCDIR)/main.c      \
         $(SRCDIR)/completer.c \
         $(SRCDIR)/formatter.c \
         $(SRCDIR)/commands.c
+
+# Sources cho direct mode (auth-stub thay cho auth.c — không cần mgt-service)
+DIRECT_SRCS := $(SRCDIR)/main-direct.c \
+               $(SRCDIR)/auth-stub.c   \
+               $(SRCDIR)/netconf.c      \
+               $(SRCDIR)/schema.c       \
+               $(SRCDIR)/completer.c    \
+               $(SRCDIR)/formatter.c    \
+               $(SRCDIR)/commands.c
+
+# Sources cho MAAPI direct mode (cần WITH_MAAPI=1 CONFD_DIR=...)
+MAAPI_SRCS := $(SRCDIR)/main-maapi.c   \
+              $(SRCDIR)/maapi-ops.c     \
+              $(SRCDIR)/maapi.c         \
+              $(SRCDIR)/auth-stub.c     \
+              $(SRCDIR)/schema.c        \
+              $(SRCDIR)/completer.c     \
+              $(SRCDIR)/formatter.c
+
+# Sources cho library (không có main.c, không có completer.c — không cần readline)
+LIB_SRCS := $(SRCDIR)/lib.c       \
+             $(SRCDIR)/auth.c      \
+             $(SRCDIR)/netconf.c   \
+             $(SRCDIR)/schema.c    \
+             $(SRCDIR)/formatter.c \
+             $(SRCDIR)/commands.c
+
+LIB_NAME   := libclinetconf
+LIB_STATIC := $(LIB_NAME).a
+LIB_SHARED := $(LIB_NAME).so
 
 # ----- Platform detection -----
 UNAME := $(shell uname -s)
@@ -72,25 +104,77 @@ ifdef WITH_MAAPI
     LDFLAGS += -L$(CONFD_DIR)/lib -lconfd
 endif
 
-OBJS := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o, $(SRCS))
+OBJS        := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o,   $(SRCS))
+DIRECT_OBJS := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o,   $(DIRECT_SRCS))
+MAAPI_OBJS  := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o,   $(MAAPI_SRCS))
+LIB_OBJS    := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.lo, $(LIB_SRCS))
 
 # ============================================================
+.PHONY: all direct maapi-direct lib lib-shared clean run-tcp run-ssh run-direct run-maapi docker-build docker-build-no-ssh
+
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 	@echo "Build OK → $(TARGET)"
 
+# ---- Direct TCP/SSH mode binary (không cần mgt-service) ----
+direct: $(TARGET_DIRECT)
+
+$(TARGET_DIRECT): $(DIRECT_OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+	@echo "Build OK → $(TARGET_DIRECT)"
+
+# ---- MAAPI direct mode (cần WITH_MAAPI=1 CONFD_DIR=...) ----
+maapi-direct:
+	$(MAKE) WITH_MAAPI=1 $(TARGET_MAAPI)
+
+$(TARGET_MAAPI): $(MAAPI_OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+	@echo "Build OK → $(TARGET_MAAPI)"
+
+# ---- Static library (.a) ----
+lib: $(LIB_STATIC)
+
+$(LIB_STATIC): $(LIB_OBJS)
+	ar rcs $@ $^
+	@echo "Build OK → $(LIB_STATIC)"
+
+# ---- Shared library (.so) ----
+lib-shared: $(LIB_SHARED)
+
+$(LIB_SHARED): $(LIB_OBJS)
+	$(CC) -shared -o $@ $^ $(CURL_LDFLAGS) $(XML2_LDFLAGS)
+	@echo "Build OK → $(LIB_SHARED)"
+
+# ---- Object files cho executable (.o) ----
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# ---- Object files cho library (.lo — compiled with -fPIC) ----
+$(OBJDIR)/%.lo: $(SRCDIR)/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET)
+	rm -rf $(OBJDIR) $(TARGET) $(TARGET_DIRECT) $(TARGET_MAAPI) $(LIB_STATIC) $(LIB_SHARED)
 
 # ----- Chạy với mock servers -----
+run-direct:
+	NETCONF_HOST=127.0.0.1 \
+	NETCONF_PORT=2023 \
+	NETCONF_MODE=tcp \
+	NE_NAME=mock-ne \
+	./$(TARGET_DIRECT)
+
+run-maapi:
+	CONFD_IPC_ADDR=127.0.0.1 \
+	CONFD_IPC_PORT=4565 \
+	NE_NAME=confd \
+	./$(TARGET_MAAPI)
+
 run-tcp:
 	MGT_URL=http://127.0.0.1:3000 \
 	NETCONF_HOST=127.0.0.1 \
