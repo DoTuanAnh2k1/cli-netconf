@@ -307,22 +307,77 @@ func (s *session) cmdDisconnect() {
 	s.writef("Disconnected from %s.\n", name)
 }
 
-// moduleNameFromNamespace derives a YANG module name to try for get-schema
-// from an XML namespace URI. Common conventions:
-//   "urn:5gc:smf-config"                         → "smf-config"
-//   "urn:ietf:params:xml:ns:yang:ietf-interfaces" → "ietf-interfaces"
-func moduleNameFromNamespace(ns string) string {
+// moduleNamesFromNamespace derives candidate YANG module names to try for
+// get-schema from an XML namespace URI.  It returns candidates in priority
+// order so the caller can try each one until get-schema succeeds.
+//
+// Examples:
+//   "urn:5gc:smf-config"
+//       → ["smf-config", "smf_config"]
+//   "urn:ietf:params:xml:ns:yang:ietf-interfaces"
+//       → ["ietf-interfaces", "ietf_interfaces"]
+//   "http://yang.vttek.vn/yang/1.1/vc/configuration/v5gc/smf/2.0"
+//       → ["smf", "v5gc", "configuration", ...]   (version "2.0" is skipped)
+func moduleNamesFromNamespace(ns string) []string {
 	if ns == "" {
-		return ""
+		return nil
 	}
-	// Take the last segment after ':' or '/'
-	last := ns
-	for _, sep := range []string{":", "/"} {
-		if idx := strings.LastIndex(last, sep); idx >= 0 {
-			last = last[idx+1:]
+
+	// Split on '/' and ':' to get individual path segments.
+	segments := strings.FieldsFunc(ns, func(r rune) bool {
+		return r == '/' || r == ':'
+	})
+
+	// Noise segments that never form a module name.
+	noise := map[string]bool{
+		"http": true, "https": true, "urn": true,
+		"www": true, "yang": true, "ietf": true,
+		"params": true, "xml": true, "ns": true, "": true,
+	}
+
+	var candidates []string
+	seen := map[string]bool{}
+
+	addCandidate := func(s string) {
+		key := strings.ToLower(s)
+		if !seen[key] && s != "" {
+			seen[key] = true
+			candidates = append(candidates, s)
+			// Also try the common dash ↔ underscore variation.
+			if strings.Contains(s, "-") {
+				alt := strings.ReplaceAll(s, "-", "_")
+				if !seen[strings.ToLower(alt)] {
+					seen[strings.ToLower(alt)] = true
+					candidates = append(candidates, alt)
+				}
+			} else if strings.Contains(s, "_") {
+				alt := strings.ReplaceAll(s, "_", "-")
+				if !seen[strings.ToLower(alt)] {
+					seen[strings.ToLower(alt)] = true
+					candidates = append(candidates, alt)
+				}
+			}
 		}
 	}
-	return last
+
+	// Iterate right-to-left; skip version-like segments (start with a digit).
+	for i := len(segments) - 1; i >= 0; i-- {
+		seg := segments[i]
+		lower := strings.ToLower(seg)
+		if noise[lower] {
+			continue
+		}
+		isVersion := len(seg) > 0 && seg[0] >= '0' && seg[0] <= '9'
+		if isVersion {
+			continue
+		}
+		addCandidate(seg)
+		if len(candidates) >= 8 {
+			break
+		}
+	}
+
+	return candidates
 }
 
 func (s *session) loadSchema() {
@@ -382,28 +437,30 @@ func (s *session) loadSchema() {
 			}
 			// Not in YANG schema — try to fetch YANG via namespace.
 			ns := xmlNode.namespace
-			modName := moduleNameFromNamespace(ns)
+			candidates := moduleNamesFromNamespace(ns)
 			yangLoaded := false
-			if modName != "" {
+			for _, modName := range candidates {
 				slog.Info("schema: trying get-schema for XML-only container",
 					"container", name, "namespace", ns, "guessed_module", modName)
 				ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 				yangReply, yangErr := s.nc.GetSchema(ctx2, modName)
 				cancel2()
-				if yangErr == nil {
-					yangText := extractSchemaText(yangReply)
-					if yangText != "" {
-						parsed := parseSchemaFromYANG(yangText, ns)
-						mergeSchema(s.schema, parsed)
-						slog.Info("schema: YANG loaded via namespace probe",
-							"module", modName, "top_elements", parsed.childNames())
-						addedYang = append(addedYang, name)
-						yangLoaded = true
-					}
-				} else {
+				if yangErr != nil {
 					slog.Info("schema: namespace probe get-schema failed",
 						"module", modName, "error", yangErr)
+					continue
 				}
+				yangText := extractSchemaText(yangReply)
+				if yangText == "" {
+					continue
+				}
+				parsed := parseSchemaFromYANG(yangText, ns)
+				mergeSchema(s.schema, parsed)
+				slog.Info("schema: YANG loaded via namespace probe",
+					"module", modName, "top_elements", parsed.childNames())
+				addedYang = append(addedYang, name)
+				yangLoaded = true
+				break
 			}
 			if !yangLoaded {
 				// Last resort: use the XML-derived node (may have wrong depth).
