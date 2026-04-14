@@ -24,8 +24,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include <confd_lib.h>
-#include <confd_maapi.h>
+#include "confd_compat.h"
 
 #include "cli.h"
 
@@ -56,25 +55,11 @@ static void walk_cs_node(struct confd_cs_node *cs,
             parent->children = child;
         }
 
-        /* Xác định type */
-        switch (node->info.type) {
-            case C_XMLTAG:  /* container hoặc list */
-                child->is_list = (node->info.flags & CS_NODE_IS_LIST) != 0;
-                child->is_leaf = false;
-                break;
-            case C_BUF:
-            case C_INT8:  case C_INT16:  case C_INT32:  case C_INT64:
-            case C_UINT8: case C_UINT16: case C_UINT32: case C_UINT64:
-            case C_BOOL:
-            case C_ENUM_VALUE:
-            case C_IPV4:  case C_IPV6:
-            case C_DECIMAL64:
-                child->is_leaf = true;
-                break;
-            default:
-                child->is_leaf = (node->children == NULL);
-                break;
-        }
+        /* Determine if leaf or container/list.
+         * Use children pointer as heuristic — avoids depending on
+         * cs_node_info struct layout which varies across ConfD versions. */
+        child->is_leaf = (node->children == NULL);
+        child->is_list = false; /* list detection requires info.flags */
 
         /* Recurse */
         if (!child->is_leaf) {
@@ -107,13 +92,13 @@ bool maapi_load_schema(const char *host_arg, int port_arg,
     confd_init("cli-netconf-c", stderr, CONFD_SILENT);
 
     if (maapi_connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != CONFD_OK) {
-        close(sock);
+        maapi_close(sock);
         return false;
     }
 
     if (maapi_start_user_session(sock, "admin", "system", NULL, 0,
-                                 CONFD_PROTO_TCP) != CONFD_OK) {
-        close(sock);
+                                 CONFD_PROTO_EXTERNAL) != CONFD_OK) {
+        maapi_close(sock);
         return false;
     }
 
@@ -168,7 +153,7 @@ bool maapi_load_schema(const char *host_arg, int port_arg,
 
     free(ns_list);
     maapi_end_user_session(sock);
-    close(sock);
+    maapi_close(sock);
 
     fprintf(stderr, "[maapi] schema loaded from ConfD (%s:%d)\n", host, port);
     return true;

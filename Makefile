@@ -2,19 +2,18 @@
 # Makefile — CLI NETCONF (C / MAAPI)
 #
 # Requirements:
-#   libxml2   (brew install libxml2  /  dnf install libxml2-devel)
-#   readline  (brew install readline /  dnf install readline-devel)
-#   libconfd  — headers + .so từ ConfD SDK
+#   libxml2   (dnf install libxml2-devel)
+#   readline  (dnf install readline-devel)
+#   libconfd.so — chỉ cần file .so, headers đã bundled trong include/
 #
-# Build (flexible):
-#   # Nếu có đủ CONFD_DIR với include/ và lib/ bên trong:
-#   make CONFD_DIR=/opt/confd
+# Build:
+#   make CONFD_LIB=/path/to/libconfd.so
 #
-#   # Nếu chỉ có 2 file header + libconfd.so riêng lẻ:
-#   make CONFD_INCLUDE=./include CONFD_LIB=/path/to/libconfd.so
+#   # Nếu libconfd.so để ngay thư mục project:
+#   make CONFD_LIB=./libconfd.so
 #
-#   # Header để trong include/, .so để trong project:
-#   make CONFD_INCLUDE=./include CONFD_LIB=./libconfd.so
+# Run:
+#   CONFD_IPC_ADDR=172.16.25.131 CONFD_IPC_PORT=4565 ./cli-netconf
 # ============================================================
 
 CC     := gcc
@@ -29,27 +28,17 @@ SRCS := $(SRCDIR)/main.c       \
         $(SRCDIR)/schema.c     \
         $(SRCDIR)/formatter.c
 
-# ----- ConfD: hỗ trợ 2 cách chỉ định -----
-ifdef CONFD_DIR
-    CONFD_INCLUDE_DIR := $(CONFD_DIR)/include
-    CONFD_LIB_DIR     := $(CONFD_DIR)/lib
-    CONFD_LDFLAGS     := -L$(CONFD_LIB_DIR) -lconfd
-else ifdef CONFD_INCLUDE
-    # CONFD_INCLUDE = thư mục chứa confd_lib.h
-    # CONFD_LIB    = path đến libconfd.so (hoặc thư mục chứa nó)
-    CONFD_INCLUDE_DIR := $(CONFD_INCLUDE)
-    ifdef CONFD_LIB
-        # Nếu CONFD_LIB là file .so trực tiếp
-        ifneq ($(suffix $(CONFD_LIB)),.so)
-            CONFD_LDFLAGS := -L$(CONFD_LIB) -lconfd
-        else
-            CONFD_LDFLAGS := $(CONFD_LIB)
-        endif
-    else
-        CONFD_LDFLAGS := -lconfd
-    endif
+# ----- CONFD_LIB: đường dẫn đến libconfd.so -----
+ifndef CONFD_LIB
+    $(error "Cần chỉ định CONFD_LIB. Ví dụ: make CONFD_LIB=./libconfd.so")
+endif
+
+# Nếu CONFD_LIB là file .so → link trực tiếp
+# Nếu CONFD_LIB là thư mục  → -L dir -lconfd
+ifneq ($(suffix $(CONFD_LIB)),.so)
+    CONFD_LDFLAGS := -L$(CONFD_LIB) -lconfd
 else
-    $(error "Cần chỉ định CONFD_DIR hoặc CONFD_INCLUDE. Ví dụ:\n  make CONFD_DIR=/opt/confd\n  make CONFD_INCLUDE=./include CONFD_LIB=./libconfd.so")
+    CONFD_LDFLAGS := $(CONFD_LIB)
 endif
 
 # ----- Platform detection -----
@@ -69,7 +58,7 @@ else
 endif
 
 CFLAGS  := -Wall -Wextra -O2 -std=c11 -D_GNU_SOURCE -DWITH_MAAPI \
-           -I$(INCDIR) -I$(CONFD_INCLUDE_DIR) \
+           -I$(INCDIR) \
            $(XML2_CFLAGS) $(RL_CFLAGS)
 
 LDFLAGS := $(RL_LDFLAGS) $(XML2_LDFLAGS) $(CONFD_LDFLAGS)
@@ -95,6 +84,7 @@ clean:
 	rm -rf $(OBJDIR) $(TARGET)
 
 run: all
+	LD_LIBRARY_PATH=$$(dirname $(CONFD_LIB)):$$LD_LIBRARY_PATH \
 	CONFD_IPC_ADDR=$${CONFD_IPC_ADDR:-127.0.0.1} \
 	CONFD_IPC_PORT=$${CONFD_IPC_PORT:-4565} \
 	./$(TARGET)

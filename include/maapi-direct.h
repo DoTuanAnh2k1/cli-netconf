@@ -30,8 +30,8 @@ typedef struct maapi_session {
 /* Kết nối tới ConfD MAAPI */
 maapi_session_t *maapi_dial(const char *host, int port, const char *user);
 
-/* Đóng kết nối */
-void maapi_close(maapi_session_t *m);
+/* Đóng kết nối (không dùng tên maapi_close để tránh conflict với ConfD) */
+void cli_session_close(maapi_session_t *m);
 
 /* ─── Read operations ───────────────────────────────────── */
 

@@ -491,6 +491,6 @@ int main(void) {
 
     printf("Goodbye.\n");
     schema_free(g_schema);
-    maapi_close(g_maapi);
+    cli_session_close(g_maapi);
     return 0;
 }

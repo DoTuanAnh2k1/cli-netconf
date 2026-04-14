@@ -1,16 +1,12 @@
 /*
- * maapi-ops.c — MAAPI-based config operations (không cần NETCONF session)
- *
- * Thay thế hoàn toàn netconf.c khi dùng ConfD MAAPI trực tiếp:
+ * maapi-ops.c — MAAPI-based config operations
  *   get-config  → maapi_save_config (MAAPI_CONFIG_XML)
  *   edit-config → maapi_load_config (MAAPI_CONFIG_XML | MAAPI_CONFIG_MERGE)
- *   set leaf    → maapi_set_elem
+ *   set leaf    → maapi_set_elem / maapi_set_elem2
  *   delete      → maapi_delete
  *   commit      → maapi_candidate_commit
  *   discard     → maapi_candidate_reset
  *   validate    → maapi_validate_trans
- *
- * Build: make WITH_MAAPI=1 CONFD_DIR=/path/to/confd maapi-direct
  */
 #ifdef WITH_MAAPI
 
@@ -23,9 +19,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include <confd_lib.h>
-#include <confd_maapi.h>
-
+#include "confd_compat.h"
 #include "cli.h"
 #include "maapi-direct.h"
 
@@ -65,13 +59,13 @@ static char *write_tmp_str(const char *str) {
 /* Mở write transaction nếu chưa có */
 static int ensure_write_trans(maapi_session_t *m) {
     if (m->has_write) return 0;
-    if (maapi_start_write_trans(m->sock, CONFD_CANDIDATE,
-                                MAAPI_LOCK_NONE,
-                                &m->th_write) != CONFD_OK) {
-        fprintf(stderr, "[maapi] start_write_trans failed: %s\n",
+    int th = maapi_start_trans(m->sock, CONFD_CANDIDATE, CONFD_READ_WRITE);
+    if (th < 0) {
+        fprintf(stderr, "[maapi] start_trans(write) failed: %s\n",
                 confd_lasterr());
         return -1;
     }
+    m->th_write  = th;
     m->has_write = true;
     return 0;
 }
@@ -88,10 +82,10 @@ static void drop_write_trans(maapi_session_t *m) {
 maapi_session_t *maapi_dial(const char *host, int port, const char *user) {
     confd_init("cli-netconf-maapi", stderr, CONFD_SILENT);
 
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port   = htons((uint16_t)port),
-    };
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons((uint16_t)port);
     if (inet_aton(host, &addr.sin_addr) == 0) {
         fprintf(stderr, "[maapi] invalid address: %s\n", host);
         return NULL;
@@ -109,12 +103,12 @@ maapi_session_t *maapi_dial(const char *host, int port, const char *user) {
 
     if (maapi_start_user_session(sock,
                                  user ? user : "admin",
-                                 "maapi-direct",
+                                 "system",
                                  NULL, 0,
-                                 CONFD_PROTO_TCP) != CONFD_OK) {
+                                 CONFD_PROTO_EXTERNAL) != CONFD_OK) {
         fprintf(stderr, "[maapi] start_user_session failed: %s\n",
                 confd_lasterr());
-        close(sock);
+        maapi_close(sock);
         return NULL;
     }
 
@@ -126,23 +120,22 @@ maapi_session_t *maapi_dial(const char *host, int port, const char *user) {
     return m;
 }
 
-void maapi_close(maapi_session_t *m) {
+void cli_session_close(maapi_session_t *m) {
     if (!m) return;
     if (m->has_write) {
         maapi_finish_trans(m->sock, m->th_write);
     }
     maapi_end_user_session(m->sock);
-    close(m->sock);
+    maapi_close(m->sock);   /* ConfD's own maapi_close(int sock) */
     free(m);
 }
 
 /* ─── Read ──────────────────────────────────────────────── */
 
 char *maapi_get_config_xml(maapi_session_t *m, int db) {
-    int th;
-    if (maapi_start_read_trans(m->sock, db,
-                               MAAPI_LOCK_NONE, &th) != CONFD_OK) {
-        fprintf(stderr, "[maapi] start_read_trans failed: %s\n",
+    int th = maapi_start_trans(m->sock, db, CONFD_READ);
+    if (th < 0) {
+        fprintf(stderr, "[maapi] start_trans(read) failed: %s\n",
                 confd_lasterr());
         return NULL;
     }
@@ -192,11 +185,9 @@ int maapi_set_value_str(maapi_session_t *m,
                         const char *keypath, const char *value) {
     if (ensure_write_trans(m) != 0) return -1;
 
-    confd_value_t v;
-    CONFD_SET_STR(&v, value);
-
-    if (maapi_set_elem(m->sock, m->th_write, &v, "%s", keypath) != CONFD_OK) {
-        fprintf(stderr, "[maapi] set_elem %s = %s failed: %s\n",
+    /* maapi_set_elem2 takes a plain string — no confd_value_t needed */
+    if (maapi_set_elem2(m->sock, m->th_write, value, "%s", keypath) != CONFD_OK) {
+        fprintf(stderr, "[maapi] set_elem2 %s = %s failed: %s\n",
                 keypath, value, confd_lasterr());
         return -1;
     }
