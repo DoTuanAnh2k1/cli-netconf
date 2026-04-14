@@ -108,4 +108,10 @@ run-ssh:
 	WITH_SSH=1 \
 	./$(TARGET)
 
-.PHONY: all clean run-tcp run-ssh
+docker-build:
+	docker build -t cli-netconf-c .
+
+docker-build-no-ssh:
+	docker build --build-arg WITH_SSH=0 -t cli-netconf-c .
+
+.PHONY: all clean run-tcp run-ssh docker-build docker-build-ssh

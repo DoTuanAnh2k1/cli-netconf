@@ -6,7 +6,7 @@
 #   c/    — C implementation  (direct mode, MAAPI optional)
 # ============================================================
 
-.PHONY: all build-go build-c clean-go clean-c clean test-go run-go run-c
+.PHONY: all build-go build-c clean-go clean-c clean test-go run-go run-c docker-build-c
 
 all: build-go build-c
 
@@ -34,6 +34,9 @@ clean-c:
 
 run-c:
 	$(MAKE) -C c run-tcp
+
+docker-build-c:
+	$(MAKE) -C c docker-build
 
 # ---- Combined ----
 
