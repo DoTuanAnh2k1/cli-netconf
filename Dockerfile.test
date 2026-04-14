@@ -1,0 +1,44 @@
+FROM almalinux:8
+
+RUN dnf install -y gcc make libxml2-devel readline-devel && dnf clean all
+
+WORKDIR /build
+COPY . .
+
+# Build stub libconfd.so
+COPY <<'STUB' /tmp/confd_stub.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
+void confd_init(const char *n, FILE *f, int d) {}
+const char *confd_lasterr(void) { return "stub"; }
+const char *confd_hash2str(unsigned int h) { return NULL; }
+int  confd_get_nslist(void **p) { *p = NULL; return 0; }
+void *confd_find_cs_root(unsigned int ns) { return NULL; }
+int maapi_connect(int s, void *a, int l) { return -1; }
+int maapi_start_user_session(int s, const char *u, const char *c, const char **g, int n, int p) { return -1; }
+int maapi_end_user_session(int s) { return 0; }
+int maapi_start_trans(int s, int db, int rw) { return -1; }
+int maapi_finish_trans(int s, int th) { return 0; }
+int maapi_apply_trans(int s, int th, int k) { return -1; }
+int maapi_validate_trans(int s, int th, int u, int f) { return -1; }
+int maapi_candidate_commit(int s) { return -1; }
+int maapi_candidate_reset(int s) { return -1; }
+int maapi_lock(int s, int db) { return -1; }
+int maapi_unlock(int s, int db) { return -1; }
+int maapi_save_config(int s, int th, int f, int fd) { return -1; }
+int maapi_load_config(int s, int th, int f, const char *p) { return -1; }
+int maapi_set_elem(int s, int th, void *v, const char *fmt, ...) { return -1; }
+int maapi_set_elem2(int s, int th, const char *val, const char *fmt, ...) { return -1; }
+int maapi_delete(int s, int th, const char *fmt, ...) { return -1; }
+int maapi_close(int s) { return 0; }
+STUB
+
+RUN gcc -shared -fPIC -o libconfd.so /tmp/confd_stub.c
+
+RUN make clean && make CONFD_LIB=./libconfd.so
+
+RUN echo "=== ldd ===" && ldd cli-netconf
+
+CMD ["sh", "-c", "LD_LIBRARY_PATH=/build ./cli-netconf; echo \"exit=$?\""]

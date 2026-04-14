@@ -29,8 +29,12 @@ SRCS := $(SRCDIR)/main.c       \
         $(SRCDIR)/formatter.c
 
 # ----- CONFD_LIB: đường dẫn đến libconfd.so -----
+ifeq ($(MAKECMDGOALS),clean)
+    CONFD_LIB ?= /dev/null
+else
 ifndef CONFD_LIB
     $(error "Cần chỉ định CONFD_LIB. Ví dụ: make CONFD_LIB=./libconfd.so")
+endif
 endif
 
 # Nếu CONFD_LIB là file .so → link trực tiếp
