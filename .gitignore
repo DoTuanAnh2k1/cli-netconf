@@ -4,6 +4,9 @@ host_key.pub
 *.exe
 .claude/*
 cli-netconf
-mock-mgt
-mock-netconf
+/mock-mgt
+/mock-netconf
 config.yang
+c/obj/
+c/cli-netconf-c
+netconf

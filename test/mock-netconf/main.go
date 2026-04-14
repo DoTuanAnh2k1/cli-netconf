@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/xml"
@@ -306,8 +307,11 @@ func handleNetconf(ch io.ReadWriter, ds *dataStore, sessionID int64) {
 
 	writeMsg(ch, hello)
 
+	// Use a buffered reader so bytes read past one ]]>]]> are not lost
+	br := bufio.NewReader(ch)
+
 	// Read client hello (and discard)
-	_, err := readMsg(ch)
+	_, err := readMsg(br)
 	if err != nil {
 		log.Printf("[session %d] read client hello: %v", sessionID, err)
 		return
@@ -316,7 +320,7 @@ func handleNetconf(ch io.ReadWriter, ds *dataStore, sessionID int64) {
 
 	// RPC loop
 	for {
-		msg, err := readMsg(ch)
+		msg, err := readMsg(br)
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("[session %d] read rpc: %v", sessionID, err)
@@ -713,19 +717,20 @@ func extractTag(xmlStr, tag string) string {
 // NETCONF framing (base:1.0 — delimiter ]]>]]>)
 // ---------------------------------------------------------------------------
 
-func readMsg(r io.Reader) (string, error) {
+// readMsg reads one NETCONF message (terminated by ]]>]]>) from a bufio.Reader.
+// Using bufio.Reader ensures that bytes consumed past the delimiter in a single
+// Read call are retained in the buffer for the next readMsg call.
+func readMsg(r *bufio.Reader) (string, error) {
 	var buf strings.Builder
-	tmp := make([]byte, 4096)
 	for {
-		n, err := r.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
-			if idx := strings.Index(buf.String(), netconfDelimiter); idx >= 0 {
-				return strings.TrimSpace(buf.String()[:idx]), nil
-			}
-		}
+		b, err := r.ReadByte()
 		if err != nil {
 			return "", err
+		}
+		buf.WriteByte(b)
+		s := buf.String()
+		if idx := strings.Index(s, netconfDelimiter); idx >= 0 {
+			return strings.TrimSpace(s[:idx]), nil
 		}
 	}
 }
