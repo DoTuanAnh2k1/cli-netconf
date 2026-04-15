@@ -24,7 +24,7 @@
 # =============================================================================
 
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM ubuntu:24.04 AS builder
+FROM 172.20.1.22/proxy-cache/library/ubuntu:24.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc make libxml2-dev libreadline-dev \
@@ -43,7 +43,7 @@ RUN make CONFD_LIB=/build/libconfd.so \
          LDFLAGS="-lreadline -lxml2 -L/build -lconfd -lcrypto -Wl,-rpath,/usr/lib/cli"
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
-FROM ubuntu:24.04
+FROM 172.20.1.22/proxy-cache/library/ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-server \

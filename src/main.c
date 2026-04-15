@@ -995,6 +995,106 @@ static int http_post_json(const char *url, const char *body,
 }
 
 /*
+ * http_get_json — GET request tới url, trả về HTTP status code.
+ * Tương tự http_post_json nhưng dùng method GET (không có body).
+ *
+ * extra_headers: chuỗi "\r\n"-terminated (có thể NULL).
+ * resp_out:      nếu != NULL, nhận malloc'd response body (caller free).
+ * Trả về HTTP status hoặc -1 nếu lỗi kết nối.
+ */
+static int http_get_json(const char *url, const char *extra_headers,
+                         char **resp_out) {
+    if (resp_out) *resp_out = NULL;
+    if (!url || !*url) return -1;
+
+    char host[256], path[1024];
+    int  port;
+    if (parse_url(url, host, sizeof(host), &port, path, sizeof(path)) != 0) {
+        fprintf(stderr, "[mgt-svc] bad url: %s\n", url);
+        return -1;
+    }
+
+    char portstr[16]; snprintf(portstr, sizeof(portstr), "%d", port);
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    int gai = getaddrinfo(host, portstr, &hints, &res);
+    if (gai != 0 || !res) {
+        fprintf(stderr, "[mgt-svc] resolve %s failed: %s\n",
+                host, gai_strerror(gai));
+        if (res) freeaddrinfo(res);
+        return -1;
+    }
+
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) {
+        fprintf(stderr, "[mgt-svc] socket: %s\n", strerror(errno));
+        freeaddrinfo(res);
+        return -1;
+    }
+
+    if (connect_with_timeout(sock, res->ai_addr, res->ai_addrlen,
+                             MGT_HTTP_CONNECT_TIMEOUT_S) != 0) {
+        fprintf(stderr, "[mgt-svc] connect %s:%d failed: %s\n",
+                host, port, strerror(errno));
+        close(sock); freeaddrinfo(res); return -1;
+    }
+    freeaddrinfo(res);
+
+    struct timeval tv = { .tv_sec = MGT_HTTP_IO_TIMEOUT_S, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    char hdr[2048];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "Accept: application/json\r\n"
+        "Connection: close\r\n"
+        "%s"
+        "\r\n", path, host, port,
+        extra_headers ? extra_headers : "");
+    if (hlen < 0 || hlen >= (int)sizeof(hdr)) {
+        fprintf(stderr, "[mgt-svc] header too large\n");
+        close(sock); return -1;
+    }
+
+    if (send(sock, hdr, (size_t)hlen, MSG_NOSIGNAL) < 0) {
+        fprintf(stderr, "[mgt-svc] send failed: %s\n", strerror(errno));
+        close(sock); return -1;
+    }
+
+    /* Read response — dùng buffer lớn hơn vì list NE có thể dài */
+    size_t cap = 16384, got = 0;
+    char *buf = malloc(cap);
+    if (!buf) { close(sock); return -1; }
+    ssize_t n;
+    while (got < cap - 1 &&
+           (n = recv(sock, buf + got, cap - 1 - got, 0)) > 0) {
+        got += (size_t)n;
+    }
+    buf[got] = '\0';
+    close(sock);
+
+    int status = -1;
+    if (got > 12 && strncmp(buf, "HTTP/", 5) == 0) {
+        const char *sp = strchr(buf, ' ');
+        if (sp) status = atoi(sp + 1);
+    }
+    if (resp_out) {
+        char *body_start = strstr(buf, "\r\n\r\n");
+        if (body_start) {
+            body_start += 4;
+            *resp_out = strdup(body_start);
+        } else {
+            *resp_out = strdup(buf);
+        }
+    }
+    free(buf);
+    return status;
+}
+
+/*
  * mgt_base_url — URL gốc của mgt-svc (env MGT_SVC_BASE).
  * Mặc định: http://127.0.0.1:8080
  */
@@ -1054,6 +1154,207 @@ static char *json_extract_string(const char *json, const char *key) {
     memcpy(out, start, len);
     out[len] = '\0';
     return out;
+}
+
+/* ─── NE list từ mgt-svc ──────────────────────────────────────── */
+
+/* Thông tin một Network Element lấy từ API /aa/list/ne */
+typedef struct ne_item {
+    char site[64];
+    char ne[64];
+    char ip[64];
+    char description[128];
+    char ns[64];              /* namespace */
+    int  port;
+    char conf_master_ip[64];  /* IP dùng để kết nối ConfD MAAPI */
+    int  conf_port_master_tcp;/* Port ConfD IPC (MAAPI) */
+} ne_item_t;
+
+#define NE_LIST_MAX 128
+
+/*
+ * json_extract_int — Lấy giá trị integer của field "key" trong JSON object.
+ * Trả về giá trị int, hoặc def nếu không tìm thấy.
+ */
+static int json_extract_int(const char *json, const char *key, int def) {
+    if (!json || !key) return def;
+
+    size_t klen = strlen(key);
+    char *needle = malloc(klen + 4);
+    if (!needle) return def;
+    snprintf(needle, klen + 4, "\"%s\"", key);
+
+    const char *p = strstr(json, needle);
+    free(needle);
+    if (!p) return def;
+    p += klen + 2;
+
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != ':') return def;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+
+    if (*p == '-' || (*p >= '0' && *p <= '9'))
+        return atoi(p);
+    return def;
+}
+
+/*
+ * fetch_ne_list — Gọi GET /aa/list/ne, parse JSON, trả về mảng ne_item_t.
+ *
+ * @param token  JWT token (header Authorization)
+ * @param out    mảng ne_item_t[NE_LIST_MAX] do caller cấp
+ * @return       số NE parse được, hoặc -1 nếu lỗi
+ */
+static int fetch_ne_list(const char *token, ne_item_t *out) {
+    char url[1024];
+    mgt_endpoint(url, sizeof(url), "/aa/list/ne");
+
+    char auth_hdr[4200];
+    snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: %s\r\n", token);
+
+    char *resp = NULL;
+    int status = http_get_json(url, auth_hdr, &resp);
+
+    if (status < 0) {
+        fprintf(stderr, "%snodes: cannot reach mgt-svc%s (url=%s)\n",
+                COLOR_RED, COLOR_RESET, url);
+        free(resp); return -1;
+    }
+    if (status != 200 && status != 302) {
+        fprintf(stderr, "%snodes: HTTP %d%s\n", COLOR_RED, status, COLOR_RESET);
+        if (resp && *resp) fprintf(stderr, "%s\n", resp);
+        free(resp); return -1;
+    }
+    if (!resp || !*resp) {
+        fprintf(stderr, "%snodes: empty response%s\n", COLOR_RED, COLOR_RESET);
+        free(resp); return -1;
+    }
+
+    const char *arr = strstr(resp, "\"neDataList\"");
+    if (!arr) { free(resp); return -1; }
+
+    const char *p = strchr(arr, '[');
+    if (!p) { free(resp); return 0; }
+
+    int count = 0;
+    p++;
+    while (*p && count < NE_LIST_MAX) {
+        const char *obj_start = strchr(p, '{');
+        if (!obj_start) break;
+        const char *obj_end = strchr(obj_start, '}');
+        if (!obj_end) break;
+
+        size_t olen = (size_t)(obj_end - obj_start + 1);
+        char *obj = malloc(olen + 1);
+        if (!obj) break;
+        memcpy(obj, obj_start, olen);
+        obj[olen] = '\0';
+
+        ne_item_t *ne = &out[count];
+        memset(ne, 0, sizeof(*ne));
+
+        char *s;
+        if ((s = json_extract_string(obj, "site")))        { snprintf(ne->site, sizeof(ne->site), "%s", s); free(s); }
+        if ((s = json_extract_string(obj, "ne")))           { snprintf(ne->ne,   sizeof(ne->ne),   "%s", s); free(s); }
+        if ((s = json_extract_string(obj, "ip")))           { snprintf(ne->ip,   sizeof(ne->ip),   "%s", s); free(s); }
+        if ((s = json_extract_string(obj, "description")))  { snprintf(ne->description, sizeof(ne->description), "%s", s); free(s); }
+        if ((s = json_extract_string(obj, "namespace")))       { snprintf(ne->ns,             sizeof(ne->ns),             "%s", s); free(s); }
+        if ((s = json_extract_string(obj, "conf_master_ip"))) { snprintf(ne->conf_master_ip, sizeof(ne->conf_master_ip), "%s", s); free(s); }
+        ne->port                = json_extract_int(obj, "port", 0);
+        ne->conf_port_master_tcp = json_extract_int(obj, "conf_port_master_tcp", 0);
+
+        free(obj);
+        count++;
+        p = obj_end + 1;
+    }
+
+    free(resp);
+    return count;
+}
+
+/*
+ * display_ne_list — Hiển thị bảng NE ra stdout.
+ */
+static void display_ne_list(const ne_item_t *list, int count) {
+    printf("\n%s%-4s  %-16s  %-20s  %-20s  %-15s  %-6s  %s%s\n",
+           COLOR_BOLD, "#", "Site", "NE", "Namespace",
+           "ConfD IP", "Port", "Description", COLOR_RESET);
+    printf("────  ────────────────  ────────────────────"
+           "  ────────────────────  ───────────────  ──────  ──────────────────────\n");
+
+    for (int i = 0; i < count; i++) {
+        const ne_item_t *ne = &list[i];
+        /* Hiển thị conf_master_ip/conf_port_master_tcp — fallback về ip/port nếu trống */
+        const char *disp_ip = ne->conf_master_ip[0] ? ne->conf_master_ip : ne->ip;
+        int disp_port = ne->conf_port_master_tcp ? ne->conf_port_master_tcp : ne->port;
+        printf("%-4d  %-16s  %-20s  %-20s  %-15s  %-6d  %s\n",
+               i + 1,
+               ne->site[0]        ? ne->site        : "-",
+               ne->ne[0]          ? ne->ne          : "-",
+               ne->ns[0]          ? ne->ns          : "-",
+               disp_ip[0]         ? disp_ip         : "-",
+               disp_port,
+               ne->description[0] ? ne->description : "-");
+    }
+    printf("\n");
+}
+
+/*
+ * select_ne_interactive — Cho user chọn NE bằng số thứ tự hoặc namespace.
+ * Lặp lại cho đến khi nhập đúng hoặc Ctrl+C/Ctrl+D để huỷ.
+ *
+ * @return  index (0-based) trong mảng, hoặc -1 nếu huỷ
+ */
+static int select_ne_interactive(const ne_item_t *list, int count) {
+    while (1) {
+        char *input = readline("Select NE (# or namespace): ");
+        if (!input) return -1;  /* EOF / Ctrl+D */
+
+        char *trimmed = str_trim(input);
+        if (!*trimmed) { free(input); continue; }
+
+        /* Thử parse số */
+        char *endp;
+        long idx = strtol(trimmed, &endp, 10);
+        if (*endp == '\0' && idx >= 1 && idx <= count) {
+            free(input);
+            return (int)(idx - 1);
+        }
+
+        /* So sánh namespace (case-insensitive) */
+        for (int i = 0; i < count; i++) {
+            if (strcasecmp(trimmed, list[i].ns) == 0) {
+                free(input);
+                return i;
+            }
+        }
+
+        printf("%sInvalid selection '%s'.%s Enter 1-%d or a namespace.\n",
+               COLOR_RED, trimmed, COLOR_RESET, count);
+        free(input);
+    }
+}
+
+/*
+ * cmd_nodes — Lấy và hiển thị danh sách Network Element từ mgt-svc.
+ * Yêu cầu: phải login trước (cần JWT token).
+ */
+static void cmd_nodes(void) {
+    const char *token = *g_mgt_token ? g_mgt_token : getenv("MGT_SVC_TOKEN");
+    if (!token || !*token) {
+        fprintf(stderr, "%sPlease login first.%s  (login <username>)\n",
+                COLOR_RED, COLOR_RESET);
+        return;
+    }
+
+    ne_item_t nes[NE_LIST_MAX];
+    int n = fetch_ne_list(token, nes);
+    if (n <= 0) {
+        if (n == 0) printf("No network elements found.\n");
+        return;
+    }
+    display_ne_list(nes, n);
 }
 
 /*
@@ -1189,6 +1490,74 @@ static void cmd_login(char **args, int argc) {
     printf("%sLogged in%s as %s%s%s\n",
            COLOR_GREEN, COLOR_RESET,
            COLOR_CYAN, user, COLOR_RESET);
+
+    /* ── Sau login: lấy danh sách NE và cho user chọn ── */
+    printf("\nFetching NE list...\n");
+    ne_item_t nes[NE_LIST_MAX];
+    int ne_count = fetch_ne_list(g_mgt_token, nes);
+    if (ne_count < 0) {
+        fprintf(stderr, "%sCould not fetch NE list. Use 'nodes' to retry.%s\n",
+                COLOR_RED, COLOR_RESET);
+        return;
+    }
+    if (ne_count == 0) {
+        printf("No NEs assigned to this user.\n");
+        return;
+    }
+
+    display_ne_list(nes, ne_count);
+
+    int sel = select_ne_interactive(nes, ne_count);
+    if (sel < 0) {
+        printf("NE selection cancelled.\n");
+        return;
+    }
+
+    const ne_item_t *chosen = &nes[sel];
+
+    /* Dùng conf_master_ip / conf_port_master_tcp để kết nối ConfD MAAPI,
+     * fallback về ip/port nếu trường conf_* trống */
+    const char *conn_ip   = chosen->conf_master_ip[0] ? chosen->conf_master_ip : chosen->ip;
+    int         conn_port = chosen->conf_port_master_tcp ? chosen->conf_port_master_tcp : chosen->port;
+
+    printf("\nConnecting to %s%s%s (%s:%d)...\n",
+           COLOR_CYAN, chosen->ne, COLOR_RESET,
+           conn_ip, conn_port);
+
+    /* Đóng MAAPI session cũ */
+    if (g_maapi) {
+        cli_session_close(g_maapi);
+        g_maapi = NULL;
+    }
+    if (g_schema) {
+        schema_free(g_schema);
+        g_schema = NULL;
+    }
+
+    /* Kết nối MAAPI mới tới NE đã chọn */
+    const char *maapi_user = env_or("MAAPI_USER", "admin");
+    g_maapi = maapi_dial(conn_ip, conn_port, maapi_user);
+    if (!g_maapi) {
+        fprintf(stderr, "%sMAAPI connect to %s:%d failed.%s\n",
+                COLOR_RED, conn_ip, conn_port, COLOR_RESET);
+        return;
+    }
+
+    /* Cập nhật NE name + reload schema */
+    snprintf(g_ne_name, sizeof(g_ne_name), "%s", chosen->ne);
+    update_prompt();
+
+    printf("Loading schema...\n");
+    g_schema = schema_new_node("__root__");
+    if (g_schema) {
+        maapi_load_schema_into(g_maapi, &g_schema);
+        printf("Schema loaded.\n");
+    }
+
+    printf("%sConnected to %s%s (%s:%d)%s\n",
+           COLOR_GREEN, chosen->ne,
+           chosen->ns[0] ? " " : "", chosen->ns,
+           conn_port, COLOR_RESET);
 }
 
 /*
@@ -1394,7 +1763,7 @@ static void cmd_rollback(char **args, int argc) {
     }
 }
 
-/**
+/*
  * cmd_help - Hiển thị bảng trợ giúp với danh sách lệnh và ví dụ sử dụng.
  */
 static void cmd_help(void) {
@@ -1425,6 +1794,7 @@ static void cmd_help(void) {
         "  save [--scope=X --result=Y] <cmd_name>\n"
         "                                    POST CLI op history → mgt-svc\n"
         "                                    (env MGT_SVC_BASE, MGT_SVC_URL, MGT_SVC_TOKEN)\n"
+        "  nodes                             List NEs from mgt-svc (requires login)\n"
         "  help                              This message\n"
         "  exit                              Quit\n"
         "\n"
@@ -1476,6 +1846,7 @@ static void dispatch(char *line) {
     else if (strcasecmp(argv[0], "login")    == 0) cmd_login   (argv + 1, argc - 1);
     else if (strcasecmp(argv[0], "logout")   == 0) cmd_logout  ();
     else if (strcasecmp(argv[0], "save")     == 0) cmd_save    (argv + 1, argc - 1);
+    else if (strcasecmp(argv[0], "nodes")    == 0) cmd_nodes   ();
     else if (strcasecmp(argv[0], "help")     == 0) cmd_help    ();
     else if (strcasecmp(argv[0], "?")        == 0) cmd_help    ();
     else
