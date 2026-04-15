@@ -22,6 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -85,6 +86,7 @@ static char *write_tmp_str(const char *str) {
     /* mkstemp tạo file tạm với tên duy nhất và mở nó */
     int fd = mkstemp(path);
     if (fd < 0) { free(path); return NULL; }
+    fchmod(fd, 0644);
 
     /* Ghi nội dung chuỗi vào file (nếu có) */
     if (str && *str) {
@@ -448,9 +450,13 @@ int maapi_delete_node(maapi_session_t *m, const char *keypath) {
 int maapi_do_validate(maapi_session_t *m) {
     if (!m->has_write) return 0; /* Không có thay đổi → không cần validate */
 
+    /* unlock=1: giữ trans mở cho các thao tác tiếp theo (vd: commit).
+     * Theo confd_lib_maapi(3): nếu unlock=0 thì call kế tiếp BẮT BUỘC là
+     * maapi_prepare_trans() hoặc maapi_finish_trans() — apply_trans() sẽ fail.
+     * forcevalidation=1: bắt buộc validate trên candidate datastore. */
     if (maapi_validate_trans(m->sock, m->th_write,
-                             0 /* unlock: không unlock sau validate */,
-                             1 /* forcevalidation: bắt buộc validate */)
+                             1 /* unlock */,
+                             1 /* forcevalidation */)
         != CONFD_OK) {
         fprintf(stderr, "[maapi] validate failed: %s\n", confd_lasterr());
         return -1;
@@ -549,6 +555,58 @@ int maapi_do_lock(maapi_session_t *m, int db) {
 int maapi_do_unlock(maapi_session_t *m, int db) {
     if (maapi_unlock(m->sock, db) != CONFD_OK) {
         fprintf(stderr, "[maapi] unlock failed: %s\n", confd_lasterr());
+        return -1;
+    }
+    return 0;
+}
+
+/* ─── Rollback ────────────────────────────────────────────── */
+
+/*
+ * maapi_do_list_rollbacks — Liệt kê các rollback file ConfD đang lưu.
+ *
+ * Trả về số entry đã ghi vào `out` (≤ max), -1 nếu lỗi.
+ * Mảng out đã được lọc/sắp xếp theo thứ tự ConfD trả về (mới nhất trước).
+ */
+int maapi_do_list_rollbacks(maapi_session_t *m,
+                            struct rollback_entry *out, int max) {
+    if (!m || !out || max <= 0) return -1;
+
+    struct maapi_rollback raw[64];
+    int cap = max < 64 ? max : 64;
+    int n   = cap;  /* IN: capacity, OUT: actual count */
+    if (maapi_list_rollbacks(m->sock, raw, &n) != CONFD_OK) {
+        fprintf(stderr, "[maapi] list_rollbacks failed: %s\n", confd_lasterr());
+        return -1;
+    }
+    if (n > cap) n = cap;
+
+    for (int i = 0; i < n; i++) {
+        out[i].nr       = raw[i].nr;
+        out[i].fixed_nr = raw[i].fixed_nr;
+        snprintf(out[i].creator, sizeof(out[i].creator), "%s", raw[i].creator);
+        snprintf(out[i].datestr, sizeof(out[i].datestr), "%s", raw[i].datestr);
+        snprintf(out[i].via,     sizeof(out[i].via),     "%s", raw[i].via);
+        snprintf(out[i].label,   sizeof(out[i].label),   "%s", raw[i].label);
+        snprintf(out[i].comment, sizeof(out[i].comment), "%s", raw[i].comment);
+    }
+    return n;
+}
+
+/*
+ * maapi_do_load_rollback — Stage một rollback file vào candidate.
+ *
+ * Mở write trans (nếu chưa có), gọi maapi_load_rollback(num) trên trans đó.
+ * Nội dung rollback được merge vào candidate; người dùng cần `commit` để
+ * áp dụng vào running.
+ */
+int maapi_do_load_rollback(maapi_session_t *m, int rollback_num) {
+    if (!m) return -1;
+    if (ensure_write_trans(m) != 0) return -1;
+
+    if (maapi_load_rollback(m->sock, m->th_write, rollback_num) != CONFD_OK) {
+        fprintf(stderr, "[maapi] load_rollback %d failed: %s\n",
+                rollback_num, confd_lasterr());
         return -1;
     }
     return 0;

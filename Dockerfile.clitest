@@ -1,0 +1,15 @@
+FROM almalinux:8
+
+RUN dnf install -y gcc make libxml2-devel readline-devel compat-openssl10 && dnf clean all
+
+WORKDIR /build
+COPY Makefile ./
+COPY src ./src
+COPY include ./include
+COPY libconfd-server.so libcrypto-server.so ./
+
+RUN ln -sf /usr/lib64/libcrypto.so.1.0.2o /usr/lib64/libcrypto.so.1.0.0 && ldconfig
+
+RUN make CONFD_LIB=./libconfd-server.so
+
+CMD ["/bin/bash"]

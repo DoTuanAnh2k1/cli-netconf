@@ -1,0 +1,13 @@
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc make libxml2-dev libreadline-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY Makefile ./
+COPY src ./src
+COPY include ./include
+COPY libconfd-server.so libcrypto-server.so ./
+
+RUN make CONFD_LIB=./libconfd-server.so

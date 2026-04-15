@@ -81,6 +81,27 @@ int maapi_do_discard(maapi_session_t *m);
 int maapi_do_lock(maapi_session_t *m, int db);
 int maapi_do_unlock(maapi_session_t *m, int db);
 
+/* ─── Rollback ──────────────────────────────────────────── */
+/* List up to max rollback entries. Trả về số entry, -1 nếu lỗi. */
+struct rollback_entry {
+    int  nr;
+    int  fixed_nr;
+    char creator[64];
+    char datestr[64];
+    char via[64];
+    char label[64];
+    char comment[128];
+};
+int maapi_do_list_rollbacks(maapi_session_t *m,
+                            struct rollback_entry *out, int max);
+
+/*
+ * Apply rollback theo số thứ tự (rollback_num: như hiển thị trong list).
+ * Stage vào candidate (write trans), KHÔNG tự commit. Caller gọi commit/discard.
+ * Trả về 0 OK, -1 lỗi.
+ */
+int maapi_do_load_rollback(maapi_session_t *m, int rollback_num);
+
 /* ─── Schema ────────────────────────────────────────────── */
 
 /* Load YANG schema từ ConfD vào schema_node tree */

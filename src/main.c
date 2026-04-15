@@ -39,8 +39,16 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <time.h>
+#include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <termios.h>
 #include "confd_compat.h"
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -60,6 +68,13 @@ static char             g_prompt[256];
 
 /* Tên thiết bị mạng (Network Element), hiển thị trong prompt */
 static char             g_ne_name[128] = "confd";
+
+/* Token JWT lấy từ mgt-svc sau khi login. Rỗng nếu chưa login.
+ * Dùng cho header "Authorization: Basic <token>" trong mọi request kế tiếp. */
+static char             g_mgt_token[4096] = "";
+
+/* Username đang đăng nhập (để hiển thị trên prompt sau login). */
+static char             g_mgt_user[128] = "";
 
 /* ─── Hàm tiện ích (Helpers) ─────────────────────────────────── */
 
@@ -155,6 +170,18 @@ static void paged_print(const char *text) {
     int page = get_terminal_rows() - 1; /* Trừ 1 dòng dành cho prompt <MORE> */
     if (page < 5) page = 5;             /* Đảm bảo tối thiểu 5 dòng mỗi trang */
 
+    /* Đặt terminal vào cbreak mode: đọc 1 phím không cần Enter, không echo.
+     * Nhờ vậy bấm phím không đẩy con trỏ xuống → <MORE> luôn ở dòng cuối. */
+    struct termios old_tio, new_tio;
+    int raw_ok = (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &old_tio) == 0);
+    if (raw_ok) {
+        new_tio = old_tio;
+        new_tio.c_lflag &= ~(ICANON | ECHO);
+        new_tio.c_cc[VMIN]  = 1;
+        new_tio.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+    }
+
     const char *p = text;
     int lines = 0;
     while (*p) {
@@ -174,13 +201,26 @@ static void paged_print(const char *text) {
             printf("%s<MORE>%s [Enter] next [a] all [q] quit — %d lines left ",
                    COLOR_YELLOW, COLOR_RESET, rem);
             fflush(stdout);
-            char ch = (char)getchar();
-            printf("\r\033[2K");   /* Xoá dòng prompt <MORE> */
-            if (ch == 'q' || ch == 'Q' || ch == 27) return;         /* Thoát pager */
-            if (ch == 'a' || ch == 'A' || ch == 'G') { printf("%s", p); return; } /* In hết phần còn lại */
-            /* Mặc định (Enter): tiếp tục hiển thị trang tiếp theo */
+            int ch = getchar();
+            /* Xoá dòng <MORE> ngay tại chỗ: \r về đầu dòng, \033[2K xoá toàn bộ dòng.
+             * Vì đã tắt ECHO, bấm phím không in ký tự nào → con trỏ vẫn ở dòng <MORE>. */
+            fputs("\r\033[2K", stdout);
+            fflush(stdout);
+            if (ch == 'q' || ch == 'Q' || ch == 27 || ch == EOF) {
+                if (raw_ok) tcsetattr(STDIN_FILENO, TCSANOW, &old_tio);
+                return;
+            }
+            if (ch == 'a' || ch == 'A' || ch == 'G') {
+                /* In toàn bộ phần còn lại, không pager nữa */
+                fputs(p, stdout);
+                if (raw_ok) tcsetattr(STDIN_FILENO, TCSANOW, &old_tio);
+                return;
+            }
+            /* Mặc định (Enter/Space/phím khác): tiếp tục trang kế */
         }
     }
+
+    if (raw_ok) tcsetattr(STDIN_FILENO, TCSANOW, &old_tio);
 }
 
 /* ─── Tab completion (Tự động hoàn thành bằng phím Tab) ──────── */
@@ -750,6 +790,610 @@ static void cmd_dump(char **args, int argc) {
     free(out);
 }
 
+/* ─── mgt-svc HTTP client ─────────────────────────────────── */
+
+/*
+ * parse_url — Tách URL "http://host[:port]/path" thành 3 phần.
+ * Chỉ hỗ trợ HTTP (không HTTPS). Trả về 0 nếu OK, -1 nếu lỗi.
+ */
+static int parse_url(const char *url, char *host, size_t hsz,
+                     int *port, char *path, size_t psz) {
+    const char *p = url;
+    if (strncmp(p, "http://", 7) != 0) return -1;
+    p += 7;
+
+    const char *slash = strchr(p, '/');
+    const char *colon = strchr(p, ':');
+    size_t hostlen;
+
+    if (colon && (!slash || colon < slash)) {
+        hostlen = (size_t)(colon - p);
+        *port = atoi(colon + 1);
+    } else {
+        hostlen = slash ? (size_t)(slash - p) : strlen(p);
+        *port = 80;
+    }
+    if (hostlen == 0 || hostlen >= hsz) return -1;
+    memcpy(host, p, hostlen);
+    host[hostlen] = '\0';
+    snprintf(path, psz, "%s", slash ? slash : "/");
+    return 0;
+}
+
+/*
+ * json_escape — Escape chuỗi để nhúng vào JSON.
+ * Trả về malloc'd string, caller phải free.
+ */
+static char *json_escape(const char *s) {
+    if (!s) return strdup("");
+    size_t cap = strlen(s) * 6 + 1;
+    char *out = malloc(cap);
+    if (!out) return NULL;
+    char *q = out;
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        switch (c) {
+            case '"':  *q++ = '\\'; *q++ = '"';  break;
+            case '\\': *q++ = '\\'; *q++ = '\\'; break;
+            case '\n': *q++ = '\\'; *q++ = 'n';  break;
+            case '\r': *q++ = '\\'; *q++ = 'r';  break;
+            case '\t': *q++ = '\\'; *q++ = 't';  break;
+            default:
+                if (c < 0x20) q += sprintf(q, "\\u%04x", c);
+                else          *q++ = (char)c;
+        }
+    }
+    *q = '\0';
+    return out;
+}
+
+/* Timeout cho HTTP client (giây) — đảm bảo không bao giờ hang CLI */
+#define MGT_HTTP_CONNECT_TIMEOUT_S  3
+#define MGT_HTTP_IO_TIMEOUT_S       5
+
+/*
+ * connect_with_timeout — connect() có giới hạn thời gian.
+ * Trả về 0 OK, -1 lỗi (errno set: ETIMEDOUT, ECONNREFUSED…).
+ */
+static int connect_with_timeout(int sock, const struct sockaddr *addr,
+                                socklen_t alen, int timeout_s) {
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0) return -1;
+    if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
+
+    int rc = connect(sock, addr, alen);
+    if (rc == 0) {
+        fcntl(sock, F_SETFL, flags);
+        return 0;
+    }
+    if (errno != EINPROGRESS) return -1;
+
+    struct pollfd pfd = { .fd = sock, .events = POLLOUT };
+    int pr = poll(&pfd, 1, timeout_s * 1000);
+    if (pr <= 0) {
+        if (pr == 0) errno = ETIMEDOUT;
+        return -1;
+    }
+
+    int err = 0; socklen_t elen = sizeof(err);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &elen) < 0) return -1;
+    if (err != 0) { errno = err; return -1; }
+
+    fcntl(sock, F_SETFL, flags);
+    return 0;
+}
+
+/*
+ * http_post_json — POST một body JSON tới url. Trả về HTTP status code,
+ * hoặc -1 nếu không kết nối được (đã in lỗi ra stderr; không bao giờ raise
+ * signal hay làm crash app).
+ *
+ * Bảo đảm:
+ *   - SIGPIPE không bao giờ kill app (dùng MSG_NOSIGNAL khi gửi)
+ *   - Kết nối có timeout (3s) — không hang trên host không phản hồi
+ *   - Đọc/ghi có timeout (5s) — không treo khi server câm
+ *   - Mọi lỗi malloc/parse được xử lý sạch, không leak
+ *
+ * extra_headers (có thể NULL): chuỗi đã kết thúc bằng "\r\n", mỗi header một dòng.
+ */
+static int http_post_json(const char *url, const char *body,
+                          const char *extra_headers, char **resp_out) {
+    if (resp_out) *resp_out = NULL;
+    if (!url || !*url || !body) return -1;
+
+    char host[256], path[1024];
+    int  port;
+    if (parse_url(url, host, sizeof(host), &port, path, sizeof(path)) != 0) {
+        fprintf(stderr, "[mgt-svc] bad url: %s\n", url);
+        return -1;
+    }
+
+    /* DNS resolve — getaddrinfo có thể chậm nhưng không vô tận với numeric/local */
+    char portstr[16]; snprintf(portstr, sizeof(portstr), "%d", port);
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    int gai = getaddrinfo(host, portstr, &hints, &res);
+    if (gai != 0 || !res) {
+        fprintf(stderr, "[mgt-svc] resolve %s failed: %s\n",
+                host, gai_strerror(gai));
+        return -1;
+    }
+
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) {
+        fprintf(stderr, "[mgt-svc] socket: %s\n", strerror(errno));
+        freeaddrinfo(res);
+        return -1;
+    }
+
+    if (connect_with_timeout(sock, res->ai_addr, res->ai_addrlen,
+                             MGT_HTTP_CONNECT_TIMEOUT_S) != 0) {
+        fprintf(stderr, "[mgt-svc] connect %s:%d failed: %s\n",
+                host, port, strerror(errno));
+        close(sock); freeaddrinfo(res); return -1;
+    }
+    freeaddrinfo(res);
+
+    /* Set IO timeouts để read()/send() không bao giờ block vĩnh viễn */
+    struct timeval tv = { .tv_sec = MGT_HTTP_IO_TIMEOUT_S, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* Build & send request */
+    size_t blen = strlen(body);
+    char hdr[2048];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "%s"
+        "\r\n", path, host, port, blen,
+        extra_headers ? extra_headers : "");
+    if (hlen < 0 || hlen >= (int)sizeof(hdr)) {
+        fprintf(stderr, "[mgt-svc] header too large\n");
+        close(sock); return -1;
+    }
+
+    /* MSG_NOSIGNAL: không bao giờ raise SIGPIPE nếu peer đóng giữa chừng */
+    if (send(sock, hdr, (size_t)hlen, MSG_NOSIGNAL) < 0 ||
+        send(sock, body, blen,        MSG_NOSIGNAL) < 0) {
+        fprintf(stderr, "[mgt-svc] send failed: %s\n", strerror(errno));
+        close(sock); return -1;
+    }
+
+    /* Read response (cap 4KB, có timeout per-recv) */
+    char buf[4096];
+    size_t got = 0;
+    ssize_t n;
+    while (got < sizeof(buf) - 1 &&
+           (n = recv(sock, buf + got, sizeof(buf) - 1 - got, 0)) > 0) {
+        got += (size_t)n;
+    }
+    buf[got] = '\0';
+    close(sock);
+
+    /* Parse "HTTP/1.1 NNN ..." */
+    int status = -1;
+    if (got > 12 && strncmp(buf, "HTTP/", 5) == 0) {
+        const char *sp = strchr(buf, ' ');
+        if (sp) status = atoi(sp + 1);
+    }
+    /* Find body (after \r\n\r\n) */
+    if (resp_out) {
+        char *body_start = strstr(buf, "\r\n\r\n");
+        if (body_start) {
+            body_start += 4;
+            *resp_out = strdup(body_start);
+        } else {
+            *resp_out = strdup(buf);
+        }
+    }
+    return status;
+}
+
+/*
+ * mgt_base_url — URL gốc của mgt-svc (env MGT_SVC_BASE).
+ * Mặc định: http://127.0.0.1:8080
+ */
+static const char *mgt_base_url(void) {
+    return env_or("MGT_SVC_BASE", "http://127.0.0.1:8080");
+}
+
+/*
+ * mgt_endpoint — Ghép base URL với path cố định, ghi vào buf.
+ * Caller phải cung cấp buf đủ lớn (PATH_MAX là an toàn).
+ */
+static void mgt_endpoint(char *buf, size_t bufsz, const char *path) {
+    snprintf(buf, bufsz, "%s%s", mgt_base_url(), path);
+}
+
+/*
+ * json_extract_string — Lấy giá trị string của field "key" trong JSON body.
+ *
+ * Parser tối giản: tìm "key", bỏ qua khoảng trắng và dấu ':',
+ * sau đó copy chuỗi nằm giữa cặp dấu ngoặc kép (xử lý \" và \\).
+ * Trả về malloc'd string (caller free), hoặc NULL nếu không tìm thấy.
+ */
+static char *json_extract_string(const char *json, const char *key) {
+    if (!json || !key) return NULL;
+
+    /* Tìm "key" — cần khớp đúng pattern "<key>" để tránh nhầm với prefix khác */
+    size_t klen = strlen(key);
+    char  *needle = malloc(klen + 4);
+    if (!needle) return NULL;
+    snprintf(needle, klen + 4, "\"%s\"", key);
+
+    const char *p = strstr(json, needle);
+    free(needle);
+    if (!p) return NULL;
+    p += klen + 2;  /* sau "key" */
+
+    /* Bỏ qua whitespace, ':' */
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != ':') return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != '"') return NULL;
+    p++;
+
+    /* Tìm dấu " kết thúc, xử lý escape */
+    const char *start = p;
+    while (*p && *p != '"') {
+        if (*p == '\\' && *(p+1)) p += 2;
+        else                       p++;
+    }
+    if (*p != '"') return NULL;
+
+    size_t len = (size_t)(p - start);
+    char  *out = malloc(len + 1);
+    if (!out) return NULL;
+    /* Copy nguyên si — JWT không chứa escape thật, đủ cho use case này */
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return out;
+}
+
+/*
+ * read_password — Đọc password từ stdin với echo tắt (giống ssh prompt).
+ * Trả về malloc'd string (caller free), hoặc NULL nếu lỗi/EOF.
+ */
+static char *read_password(const char *prompt) {
+    fputs(prompt, stdout); fflush(stdout);
+
+    struct termios old_tio, new_tio;
+    int raw_ok = (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &old_tio) == 0);
+    if (raw_ok) {
+        new_tio = old_tio;
+        new_tio.c_lflag &= ~ECHO;   /* tắt echo, giữ ICANON để Enter vẫn submit */
+        tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+    }
+
+    char  *buf = NULL;
+    size_t cap = 0;
+    ssize_t got = getline(&buf, &cap, stdin);
+
+    if (raw_ok) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &old_tio);
+        fputc('\n', stdout);
+    }
+
+    if (got < 0) { free(buf); return NULL; }
+    /* Trim trailing newline */
+    if (got > 0 && buf[got-1] == '\n') buf[got-1] = '\0';
+    return buf;
+}
+
+/*
+ * cmd_login - Đăng nhập mgt-svc và lấy JWT token.
+ *
+ *   login <username>             Hỏi password (echo tắt)
+ *   login <username> <password>  Truyền thẳng (lưu ý: lưu vào history)
+ *
+ * POST {MGT_SVC_BASE}/aa/authenticate với body {username, password}.
+ * Response 200 + {"response_data": "<JWT>"} → lưu vào g_mgt_token.
+ */
+static void cmd_login(char **args, int argc) {
+    if (argc < 1) {
+        printf("Usage: login <username> [<password>]\n");
+        return;
+    }
+
+    const char *user = args[0];
+    char *password_in = NULL;
+    const char *pwd;
+
+    if (argc >= 2) {
+        pwd = args[1];
+    } else {
+        password_in = read_password("Password: ");
+        if (!password_in) {
+            fprintf(stderr, "%slogin aborted%s\n", COLOR_RED, COLOR_RESET);
+            return;
+        }
+        pwd = password_in;
+    }
+
+    char *u_esc = json_escape(user);
+    char *p_esc = json_escape(pwd);
+    if (password_in) {
+        /* Wipe + free password buffer ngay khi không cần */
+        memset(password_in, 0, strlen(password_in));
+        free(password_in);
+    }
+    if (!u_esc || !p_esc) {
+        free(u_esc); free(p_esc);
+        fprintf(stderr, "%slogin: out of memory%s\n", COLOR_RED, COLOR_RESET);
+        return;
+    }
+
+    size_t blen = strlen(u_esc) + strlen(p_esc) + 64;
+    char *body = malloc(blen);
+    if (!body) {
+        free(u_esc); free(p_esc); return;
+    }
+    snprintf(body, blen,
+             "{\"username\":\"%s\",\"password\":\"%s\"}", u_esc, p_esc);
+    free(u_esc);
+    /* p_esc chứa password — wipe trước khi free */
+    memset(p_esc, 0, strlen(p_esc));
+    free(p_esc);
+
+    char url[1024];
+    mgt_endpoint(url, sizeof(url), "/aa/authenticate");
+
+    char *resp = NULL;
+    int status = http_post_json(url, body, NULL, &resp);
+    /* Wipe body (chứa password) */
+    memset(body, 0, blen);
+    free(body);
+
+    if (status < 0) {
+        fprintf(stderr, "%slogin: cannot reach mgt-svc%s (url=%s)\n",
+                COLOR_RED, COLOR_RESET, url);
+        free(resp); return;
+    }
+    if (status != 200) {
+        printf("%sLogin failed%s — HTTP %d\n", COLOR_RED, COLOR_RESET, status);
+        if (resp && *resp) fprintf(stderr, "%s\n", resp);
+        free(resp); return;
+    }
+
+    /* Parse JWT + status từ response */
+    char *token = json_extract_string(resp ? resp : "", "response_data");
+    char *st    = json_extract_string(resp ? resp : "", "status");
+    free(resp);
+
+    /* Check status field trước — mgt-svc trả 200 cả khi sai password,
+     * phân biệt qua "status":"failure" */
+    if (st && strcasecmp(st, "success") != 0) {
+        fprintf(stderr, "%sLogin failed%s — status=%s\n",
+                COLOR_RED, COLOR_RESET, st);
+        free(token); free(st);
+        return;
+    }
+    if (!token || !*token) {
+        fprintf(stderr, "%slogin: no response_data (JWT) in response%s\n",
+                COLOR_RED, COLOR_RESET);
+        free(token); free(st);
+        return;
+    }
+
+    /* Lưu token + username vào globals */
+    snprintf(g_mgt_token, sizeof(g_mgt_token), "%s", token);
+    snprintf(g_mgt_user,  sizeof(g_mgt_user),  "%s", user);
+    free(token); free(st);
+
+    printf("%sLogged in%s as %s%s%s\n",
+           COLOR_GREEN, COLOR_RESET,
+           COLOR_CYAN, user, COLOR_RESET);
+}
+
+/*
+ * cmd_logout - Xoá JWT token khỏi bộ nhớ.
+ */
+static void cmd_logout(void) {
+    if (!*g_mgt_token) {
+        printf("Not logged in.\n");
+        return;
+    }
+    /* Wipe token để không bị peek qua /proc/<pid>/mem */
+    memset(g_mgt_token, 0, sizeof(g_mgt_token));
+    g_mgt_user[0] = '\0';
+    printf("%sLogged out.%s\n", COLOR_GREEN, COLOR_RESET);
+}
+
+/*
+ * cmd_save - POST CLI operation history lên mgt-svc.
+ *
+ * API: POST /aa/history/save (mgt-svc swagger)
+ *   Headers: Authorization: Basic <token>, Content-Type: application/json
+ *   Body:    { cmd_name, ne_name, ne_ip, scope?, result? }
+ *
+ * Cú pháp:
+ *   save [--scope=X] [--result=Y] [--ne=NAME] [--ip=IP] <cmd_name...>
+ *
+ * Mặc định lấy từ:
+ *   ne_name  ← env NE_NAME (g_ne_name)
+ *   ne_ip    ← env NE_IP, fallback ConfD host
+ *   scope    ← "ne-command"
+ *   result   ← "success"
+ *
+ * Env vars:
+ *   MGT_SVC_URL    URL đầy đủ (mặc định: http://127.0.0.1:8080/aa/history/save)
+ *   MGT_SVC_TOKEN  token cho header "Authorization: Basic <token>"
+ */
+static void cmd_save(char **args, int argc) {
+    const char *scope  = "ne-command";
+    const char *result = "success";
+    const char *ne     = g_ne_name;
+    const char *ne_ip  = env_or("NE_IP", g_maapi ? g_maapi->host : "");
+
+    /* Parse các flag --key=value, phần còn lại ghép thành cmd_name */
+    char *cmd_parts[64];
+    int   cmd_cnt = 0;
+    for (int i = 0; i < argc; i++) {
+        if (strncmp(args[i], "--scope=", 8) == 0)       scope  = args[i] + 8;
+        else if (strncmp(args[i], "--result=", 9) == 0) result = args[i] + 9;
+        else if (strncmp(args[i], "--ne=", 5) == 0)     ne     = args[i] + 5;
+        else if (strncmp(args[i], "--ip=", 5) == 0)     ne_ip  = args[i] + 5;
+        else if (cmd_cnt < 64) cmd_parts[cmd_cnt++] = args[i];
+    }
+
+    if (cmd_cnt == 0) {
+        printf("Usage: save [--scope=X] [--result=Y] [--ne=NAME] [--ip=IP] "
+               "<cmd_name...>\n"
+               "  scope:  cli-config | ne-command | ne-config\n"
+               "  result: success    | failure\n");
+        return;
+    }
+
+    /* Ghép các phần command */
+    size_t total = 1;
+    for (int i = 0; i < cmd_cnt; i++) total += strlen(cmd_parts[i]) + 1;
+    char *cmd = malloc(total);
+    if (!cmd) return;
+    cmd[0] = '\0';
+    for (int i = 0; i < cmd_cnt; i++) {
+        if (i) strcat(cmd, " ");
+        strcat(cmd, cmd_parts[i]);
+    }
+
+    /* Escape tất cả field cho JSON */
+    char *cmd_esc    = json_escape(cmd);
+    char *ne_esc     = json_escape(ne);
+    char *ip_esc     = json_escape(ne_ip);
+    char *scope_esc  = json_escape(scope);
+    char *result_esc = json_escape(result);
+    free(cmd);
+    if (!cmd_esc || !ne_esc || !ip_esc || !scope_esc || !result_esc) {
+        free(cmd_esc); free(ne_esc); free(ip_esc);
+        free(scope_esc); free(result_esc);
+        return;
+    }
+
+    /* Build body theo swagger: cmd_name, ne_name, ne_ip, scope, result */
+    size_t blen = strlen(cmd_esc) + strlen(ne_esc) + strlen(ip_esc)
+                + strlen(scope_esc) + strlen(result_esc) + 256;
+    char *body = malloc(blen);
+    if (!body) {
+        free(cmd_esc); free(ne_esc); free(ip_esc);
+        free(scope_esc); free(result_esc);
+        return;
+    }
+    snprintf(body, blen,
+             "{\"cmd_name\":\"%s\","
+             "\"ne_name\":\"%s\","
+             "\"ne_ip\":\"%s\","
+             "\"scope\":\"%s\","
+             "\"result\":\"%s\"}",
+             cmd_esc, ne_esc, ip_esc, scope_esc, result_esc);
+    free(cmd_esc); free(ne_esc); free(ip_esc);
+    free(scope_esc); free(result_esc);
+
+    /* Build Authorization header — ưu tiên token in-memory từ login,
+     * fallback về env MGT_SVC_TOKEN (cho automation/CI). */
+    char auth_hdr[8192] = "";
+    const char *token = (*g_mgt_token) ? g_mgt_token : getenv("MGT_SVC_TOKEN");
+    if (token && *token) {
+        snprintf(auth_hdr, sizeof(auth_hdr),
+                 "Authorization: Basic %s\r\n", token);
+    } else {
+        fprintf(stderr, "%sNot logged in%s — run %slogin <user>%s first.\n",
+                COLOR_YELLOW, COLOR_RESET, COLOR_CYAN, COLOR_RESET);
+    }
+
+    /* URL: ưu tiên override MGT_SVC_URL, không thì base + path mặc định */
+    char url_buf[1024];
+    const char *url;
+    const char *override = getenv("MGT_SVC_URL");
+    if (override && *override) {
+        url = override;
+    } else {
+        mgt_endpoint(url_buf, sizeof(url_buf), "/aa/history/save");
+        url = url_buf;
+    }
+
+    char *resp = NULL;
+    int status = http_post_json(url, body,
+                                auth_hdr[0] ? auth_hdr : NULL, &resp);
+    free(body);
+
+    if (status < 0) {
+        fprintf(stderr, "%smgt-svc POST failed%s (url=%s)\n",
+                COLOR_RED, COLOR_RESET, url);
+    } else if (status == 201) {
+        printf("%sSaved%s (HTTP 201) → %s\n",
+               COLOR_GREEN, COLOR_RESET, url);
+        if (resp && *resp) printf("%s\n", resp);
+    } else {
+        printf("%smgt-svc returned HTTP %d%s\n",
+               COLOR_RED, status, COLOR_RESET);
+        if (resp && *resp) fprintf(stderr, "%s\n", resp);
+    }
+    free(resp);
+}
+
+/**
+ * cmd_rollback - Liệt kê hoặc áp dụng rollback file của ConfD.
+ *
+ *   rollback                      Liệt kê các rollback hiện có.
+ *   rollback <nr>                 Stage rollback số <nr> vào candidate (cần `commit`).
+ *   rollback <nr> commit          Stage và commit luôn.
+ *
+ * @param args  Mảng tham số
+ * @param argc  Số lượng tham số
+ */
+static void cmd_rollback(char **args, int argc) {
+    if (argc == 0) {
+        struct rollback_entry list[64];
+        int n = maapi_do_list_rollbacks(g_maapi, list, 64);
+        if (n < 0) {
+            fprintf(stderr, "%srollback list failed%s\n", COLOR_RED, COLOR_RESET);
+            return;
+        }
+        if (n == 0) {
+            printf("No rollback files available.\n");
+            return;
+        }
+        printf("%-6s %-20s %-12s %s\n", "NR", "DATE", "VIA", "CREATOR");
+        for (int i = 0; i < n; i++) {
+            printf("%-6d %-20s %-12s %s%s%s\n",
+                   list[i].nr, list[i].datestr, list[i].via,
+                   COLOR_CYAN, list[i].creator, COLOR_RESET);
+            if (list[i].label[0] || list[i].comment[0])
+                printf("       label=%s  comment=%s\n",
+                       list[i].label, list[i].comment);
+        }
+        return;
+    }
+
+    /* Parse số rollback */
+    char *end = NULL;
+    long nr = strtol(args[0], &end, 10);
+    if (end == args[0] || *end != '\0') {
+        fprintf(stderr, "Usage: rollback [<nr> [commit]]\n");
+        return;
+    }
+
+    if (maapi_do_load_rollback(g_maapi, (int)nr) != 0) {
+        fprintf(stderr, "%srollback %ld failed%s\n", COLOR_RED, nr, COLOR_RESET);
+        return;
+    }
+    printf("%sRollback %ld staged%s in candidate.\n",
+           COLOR_GREEN, nr, COLOR_RESET);
+
+    /* Tuỳ chọn commit ngay */
+    if (argc >= 2 && strcasecmp(args[1], "commit") == 0) {
+        cmd_commit();
+    } else {
+        printf("Run %scommit%s to apply, or %sdiscard%s to abort.\n",
+               COLOR_CYAN, COLOR_RESET, COLOR_CYAN, COLOR_RESET);
+    }
+}
+
 /**
  * cmd_help - Hiển thị bảng trợ giúp với danh sách lệnh và ví dụ sử dụng.
  */
@@ -772,6 +1416,15 @@ static void cmd_help(void) {
         "  unlock [running|candidate]        Unlock datastore\n"
         "  dump text [file]                  Export config as text\n"
         "  dump xml  [file]                  Export config as XML\n"
+        "\n"
+        "  rollback                          List rollback files\n"
+        "  rollback <nr> [commit]            Stage rollback (commit = áp dụng luôn)\n"
+        "\n"
+        "  login <user> [<password>]         Đăng nhập mgt-svc, lấy JWT token\n"
+        "  logout                            Xoá token khỏi bộ nhớ\n"
+        "  save [--scope=X --result=Y] <cmd_name>\n"
+        "                                    POST CLI op history → mgt-svc\n"
+        "                                    (env MGT_SVC_BASE, MGT_SVC_URL, MGT_SVC_TOKEN)\n"
         "  help                              This message\n"
         "  exit                              Quit\n"
         "\n"
@@ -819,6 +1472,10 @@ static void dispatch(char *line) {
     else if (strcasecmp(argv[0], "lock")     == 0) cmd_lock    (argv + 1, argc - 1);
     else if (strcasecmp(argv[0], "unlock")   == 0) cmd_unlock  (argv + 1, argc - 1);
     else if (strcasecmp(argv[0], "dump")     == 0) cmd_dump    (argv + 1, argc - 1);
+    else if (strcasecmp(argv[0], "rollback") == 0) cmd_rollback(argv + 1, argc - 1);
+    else if (strcasecmp(argv[0], "login")    == 0) cmd_login   (argv + 1, argc - 1);
+    else if (strcasecmp(argv[0], "logout")   == 0) cmd_logout  ();
+    else if (strcasecmp(argv[0], "save")     == 0) cmd_save    (argv + 1, argc - 1);
     else if (strcasecmp(argv[0], "help")     == 0) cmd_help    ();
     else if (strcasecmp(argv[0], "?")        == 0) cmd_help    ();
     else
@@ -847,6 +1504,9 @@ static void dispatch(char *line) {
 int main(void) {
     /* Cài đặt handler cho SIGINT để Ctrl+C không thoát chương trình */
     signal(SIGINT, sigint_handler);
+    /* Bỏ qua SIGPIPE: nếu mgt-svc/peer đóng socket giữa chừng,
+     * write() trả về EPIPE thay vì kill app */
+    signal(SIGPIPE, SIG_IGN);
     rl_catch_signals = 0;  /* Tắt xử lý tín hiệu mặc định của readline, dùng handler riêng */
     rl_attempted_completion_function = maapi_completer;  /* Đăng ký hàm tab-completion */
     rl_variable_bind("expand-tilde", "off");  /* Tắt mở rộng dấu ~ trong readline */

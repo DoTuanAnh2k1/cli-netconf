@@ -34,17 +34,19 @@ extern "C" {
 #endif
 
 /* ─── Datastores ─────────────────────────────────────────── */
-#define CONFD_RUNNING   1
-#define CONFD_CANDIDATE 2
+#define CONFD_CANDIDATE 1
+#define CONFD_RUNNING   2
 #define CONFD_STARTUP   3
+#define CONFD_OPERATIONAL 4
 
 /* ─── Transaction access mode ────────────────────────────── */
 #define CONFD_READ        1
 #define CONFD_READ_WRITE  2
 
 /* ─── Protocol types (for maapi_start_user_session) ─────── */
-#define CONFD_PROTO_TCP      2
-#define CONFD_PROTO_EXTERNAL 8
+#define CONFD_PROTO_TCP      1
+#define CONFD_PROTO_SSH      2
+#define CONFD_PROTO_SYSTEM   3
 
 /* ─── MAAPI save/load config flags ───────────────────────── */
 #define MAAPI_CONFIG_XML            (1 << 0)
@@ -307,6 +309,37 @@ int maapi_delete(int sock, int thandle, const char *fmt, ...);
  * NOTE: do NOT name your own function "maapi_close" to avoid conflicts.
  */
 int maapi_close(int sock);
+
+/* ─── Rollback API ───────────────────────────────────────── */
+/*
+ * struct maapi_rollback — must match confd_maapi.h layout.
+ * MAXUSERNAMELEN = 255 (from confd_lib.h).
+ */
+#ifndef MAXUSERNAMELEN
+#define MAXUSERNAMELEN 255
+#endif
+
+struct maapi_rollback {
+    int  nr;
+    char creator[MAXUSERNAMELEN];
+    char datestr[255];
+    char via[255];
+    int  fixed_nr;
+    char label[255];
+    char comment[255];
+};
+
+/*
+ * List rollback files.
+ * rp       — caller-allocated array
+ * *rp_size — IN: max entries to fill; OUT: actual number returned
+ * Returns CONFD_OK or CONFD_ERR.
+ */
+int maapi_list_rollbacks(int sock, struct maapi_rollback *rp, int *rp_size);
+
+/* Apply rollback file by sequence number into thandle (write trans). */
+int maapi_load_rollback(int sock, int thandle, int rollback_num);
+int maapi_load_rollback_fixed(int sock, int thandle, int fixed_num);
 
 #ifdef __cplusplus
 }
