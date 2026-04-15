@@ -1893,26 +1893,27 @@ int main(void) {
     printf("=====================================================\n");
     printf("   CLI - NETCONF Console (C / MAAPI Direct Mode)\n");
     printf("=====================================================%s\n\n", COLOR_RESET);
-    printf("Connecting to ConfD MAAPI %s%s:%d%s ...\n",
-           COLOR_BOLD, host, port, COLOR_RESET);
 
-    /* Thiết lập kết nối MAAPI tới ConfD */
-    g_maapi = maapi_dial(host, port, user);
-    if (!g_maapi) {
-        fprintf(stderr, "%sMAAPI connect failed. Is ConfD running?%s\n",
-                COLOR_RED, COLOR_RESET);
-        return 1;
-    }
-
-    printf("%sConnected.%s\n", COLOR_GREEN, COLOR_RESET);
-
-    /* Tải cây schema YANG từ ConfD qua MAAPI để hỗ trợ tab-completion
-     * và chuyển đổi đường dẫn dấu cách sang keypath ConfD */
-    printf("Loading schema from MAAPI...\n");
-    g_schema = schema_new_node("__root__");
-    if (g_schema) {
-        maapi_load_schema_into(g_maapi, &g_schema);
-        printf("Schema loaded.\n");
+    /* Thiết lập kết nối MAAPI tới ConfD (tuỳ chọn — có thể login + chọn NE sau) */
+    if (getenv("CONFD_IPC_ADDR") || getenv("CONFD_IPC_PORT")) {
+        printf("Connecting to ConfD MAAPI %s%s:%d%s ...\n",
+               COLOR_BOLD, host, port, COLOR_RESET);
+        g_maapi = maapi_dial(host, port, user);
+        if (!g_maapi) {
+            fprintf(stderr, "%sMAAPI connect failed. Use 'login' to select a NE.%s\n",
+                    COLOR_RED, COLOR_RESET);
+        } else {
+            printf("%sConnected.%s\n", COLOR_GREEN, COLOR_RESET);
+            printf("Loading schema from MAAPI...\n");
+            g_schema = schema_new_node("__root__");
+            if (g_schema) {
+                maapi_load_schema_into(g_maapi, &g_schema);
+                printf("Schema loaded.\n");
+            }
+        }
+    } else {
+        printf("No CONFD_IPC_ADDR set. Use %slogin%s to connect via mgt-svc.\n",
+               COLOR_CYAN, COLOR_RESET);
     }
 
     /* Khởi tạo prompt và lịch sử lệnh readline */
@@ -1942,7 +1943,7 @@ int main(void) {
 
     /* Dọn dẹp tài nguyên trước khi thoát */
     printf("Goodbye.\n");
-    schema_free(g_schema);          /* Giải phóng cây schema */
-    cli_session_close(g_maapi);     /* Đóng phiên MAAPI và giải phóng kết nối */
+    if (g_schema)  schema_free(g_schema);
+    if (g_maapi)   cli_session_close(g_maapi);
     return 0;
 }
