@@ -111,15 +111,20 @@ RUN chmod +x /usr/local/bin/auth-mgt.sh
 # ── Wrapper script — chạy khi user SSH login ────────────────────────────────
 COPY <<'CLI_WRAPPER' /usr/local/bin/cli-wrapper.sh
 #!/bin/bash
-# Wrapper runs cli-netconf with config from files written by entrypoint.
-# Called by sshd ForceCommand when user SSH in.
+# Wrapper runs cli-netconf in SSH server mode.
+# Called by sshd ForceCommand after PAM đã authenticate thành công.
+# PAM lưu JWT token vào /tmp/cli-tokens/$USER → truyền qua env MGT_SVC_TOKEN
+# → CLI skip login, nhảy thẳng vào chọn NE.
 
-# Read env from files (sshd doesn't pass container env to children)
 export LD_LIBRARY_PATH=/usr/lib/cli
-export CONFD_IPC_ADDR=$(cat /etc/confd-addr 2>/dev/null || echo "127.0.0.1")
-export CONFD_IPC_PORT=$(cat /etc/confd-port 2>/dev/null || echo "4565")
-export NE_NAME=$(cat /etc/ne-name 2>/dev/null || echo "confd")
+export MGT_SVC_BASE=$(cat /etc/mgt-url 2>/dev/null || echo "http://127.0.0.1:8080")
+export MGT_SVC_TOKEN=$(cat "/tmp/cli-tokens/$USER" 2>/dev/null)
+export MGT_SVC_USER="$USER"
 export MAAPI_USER="${USER:-admin}"
+export LOG_LEVEL=$(cat /etc/cli-log-level 2>/dev/null || echo "info")
+export LOG_FILE="/var/log/cli-netconf/${USER:-unknown}.log"
+
+mkdir -p /var/log/cli-netconf
 
 exec /usr/local/bin/cli-netconf
 CLI_WRAPPER
@@ -187,20 +192,32 @@ RUN chmod +x /usr/local/bin/sync-users.sh
 # ── Entrypoint ──────────────────────────────────────────────────────────────
 COPY <<'ENTRYPOINT_SCRIPT' /entrypoint.sh
 #!/bin/bash
-# Create SSH host keys if not present
-ssh-keygen -A 2>/dev/null
+# Tạo SSH host keys nếu chưa có.
+# Mount volume vào /etc/ssh/host-keys/ để key persist qua restart
+# → client không bị cảnh báo "REMOTE HOST IDENTIFICATION HAS CHANGED".
+KEY_DIR="/etc/ssh/host-keys"
+if [ -d "$KEY_DIR" ]; then
+    # Dùng key từ volume nếu có
+    for f in "$KEY_DIR"/ssh_host_*; do
+        [ -f "$f" ] && ln -sf "$f" /etc/ssh/
+    done
+    # Tạo key mới vào volume nếu volume rỗng
+    if ! ls "$KEY_DIR"/ssh_host_* &>/dev/null; then
+        ssh-keygen -A 2>/dev/null
+        cp /etc/ssh/ssh_host_* "$KEY_DIR/" 2>/dev/null
+    fi
+else
+    ssh-keygen -A 2>/dev/null
+fi
 
 # Write config to files (sshd child processes don't inherit container env)
-echo "${MGT_SERVICE_URL:-http://mgt-service:3000}" > /etc/mgt-url
-echo "${CONFD_IPC_ADDR:-127.0.0.1}" > /etc/confd-addr
-echo "${CONFD_IPC_PORT:-4565}" > /etc/confd-port
-echo "${NE_NAME:-confd}" > /etc/ne-name
+echo "${MGT_SVC_BASE:-http://mgt-service:8080}" > /etc/mgt-url
+echo "${LOG_LEVEL:-info}" > /etc/cli-log-level
+mkdir -p /var/log/cli-netconf
 
-echo "=== CLI NETCONF Full Mode ==="
-echo "  CONFD_IPC_ADDR:   ${CONFD_IPC_ADDR:-127.0.0.1}"
-echo "  CONFD_IPC_PORT:   ${CONFD_IPC_PORT:-4565}"
-echo "  MGT_SERVICE_URL:  ${MGT_SERVICE_URL:-http://mgt-service:3000}"
-echo "  NE_NAME:          ${NE_NAME:-confd}"
+echo "=== CLI NETCONF SSH Server Mode ==="
+echo "  MGT_SVC_BASE:  ${MGT_SVC_BASE:-http://mgt-service:8080}"
+echo "  LOG_LEVEL:     ${LOG_LEVEL:-info}"
 echo ""
 
 # Sync users from mgt-service (create system users for SSH)
@@ -217,9 +234,7 @@ RUN chmod +x /entrypoint.sh
 EXPOSE 22
 
 # Biến môi trường mặc định
-ENV CONFD_IPC_ADDR=127.0.0.1 \
-    CONFD_IPC_PORT=4565 \
-    MGT_SERVICE_URL=http://mgt-service:3000 \
-    NE_NAME=confd
+ENV MGT_SVC_BASE=http://mgt-service:8080 \
+    LOG_LEVEL=info
 
 ENTRYPOINT ["/entrypoint.sh"]

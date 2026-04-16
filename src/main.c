@@ -53,7 +53,20 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 #include "cli.h"
+#include "log.h"
 #include "maapi-direct.h"
+
+/* ─── Forward declarations ─────────────────────────────────── */
+static int select_and_connect_ne(void);
+
+/* Guard: kiểm tra MAAPI session trước khi chạy command */
+#define REQUIRE_MAAPI() do { \
+    if (!g_maapi) { \
+        fprintf(stderr, "%sNot connected.%s Use %slogin%s to connect to a NE.\n", \
+                COLOR_RED, COLOR_RESET, COLOR_CYAN, COLOR_RESET); \
+        return; \
+    } \
+} while (0)
 
 /* ─── Biến toàn cục (Globals) ───────────────────────────────── */
 
@@ -485,6 +498,7 @@ static char **maapi_completer(const char *text, int start, int end) {
  * @param argc  Số lượng tham số
  */
 static void cmd_show(char **args, int argc) {
+    REQUIRE_MAAPI();
     if (argc == 0) {
         printf("Usage: show running-config | candidate-config [path...]\n");
         return;
@@ -573,6 +587,7 @@ static char *read_xml_paste(void) {
  * @param argc  Số lượng tham số (0 = chế độ paste XML)
  */
 static void cmd_set(char **args, int argc) {
+    REQUIRE_MAAPI();
     if (argc == 0) {
         /* Chế độ paste XML: đọc khối XML từ stdin và nạp vào candidate */
         char *xml = read_xml_paste();
@@ -642,6 +657,7 @@ static void cmd_set(char **args, int argc) {
  * @param argc  Số lượng tham số
  */
 static void cmd_unset(char **args, int argc) {
+    REQUIRE_MAAPI();
     if (argc == 0) {
         printf("Usage: unset <path...>\n"
                "Example: unset system ntp server 10.0.0.1\n"
@@ -679,6 +695,7 @@ static void cmd_unset(char **args, int argc) {
  * Đo thời gian thực hiện và hiển thị kết quả (thành công hoặc thất bại).
  */
 static void cmd_commit(void) {
+    REQUIRE_MAAPI();
     struct timeval t0; gettimeofday(&t0, NULL);
     if (maapi_do_commit(g_maapi) == 0)
         printf("%sCommit successful.%s (%ldms)\n",
@@ -694,6 +711,7 @@ static void cmd_commit(void) {
  * mà không áp dụng thay đổi.
  */
 static void cmd_validate(void) {
+    REQUIRE_MAAPI();
     if (maapi_do_validate(g_maapi) == 0)
         printf("%sValidation OK.%s\n", COLOR_GREEN, COLOR_RESET);
     else
@@ -706,6 +724,7 @@ static void cmd_validate(void) {
  * Đặt lại candidate datastore về trạng thái giống running datastore.
  */
 static void cmd_discard(void) {
+    REQUIRE_MAAPI();
     if (maapi_do_discard(g_maapi) == 0)
         printf("%sDiscarded.%s\n", COLOR_GREEN, COLOR_RESET);
     else
@@ -721,6 +740,7 @@ static void cmd_discard(void) {
  * @param argc  Số lượng tham số
  */
 static void cmd_lock(char **args, int argc) {
+    REQUIRE_MAAPI();
     int db = CONFD_CANDIDATE;  /* Mặc định khoá candidate */
     if (argc > 0 && strcasecmp(args[0], "running") == 0) db = CONFD_RUNNING;
     if (maapi_do_lock(g_maapi, db) == 0)
@@ -738,6 +758,7 @@ static void cmd_lock(char **args, int argc) {
  * @param argc  Số lượng tham số
  */
 static void cmd_unlock(char **args, int argc) {
+    REQUIRE_MAAPI();
     int db = CONFD_CANDIDATE;  /* Mặc định mở khoá candidate */
     if (argc > 0 && strcasecmp(args[0], "running") == 0) db = CONFD_RUNNING;
     if (maapi_do_unlock(g_maapi, db) == 0)
@@ -755,6 +776,7 @@ static void cmd_unlock(char **args, int argc) {
  * @param argc  Số lượng tham số
  */
 static void cmd_dump(char **args, int argc) {
+    REQUIRE_MAAPI();
     const char *fmt  = (argc > 0) ? args[0] : "text";   /* Mặc định xuất dạng text */
     const char *file = (argc > 1) ? args[1] : NULL;     /* Tên file đích (tuỳ chọn) */
 
@@ -1487,77 +1509,101 @@ static void cmd_login(char **args, int argc) {
     snprintf(g_mgt_user,  sizeof(g_mgt_user),  "%s", user);
     free(token); free(st);
 
+    LOG_INFO("runtime login success: user=%s", user);
     printf("%sLogged in%s as %s%s%s\n",
            COLOR_GREEN, COLOR_RESET,
            COLOR_CYAN, user, COLOR_RESET);
 
-    /* ── Sau login: lấy danh sách NE và cho user chọn ── */
+    /* Sau login thành công → chọn NE */
+    select_and_connect_ne();
+}
+
+/*
+ * select_and_connect_ne — Lấy danh sách NE, cho user chọn, connect MAAPI.
+ *
+ * Nếu connect thất bại sẽ cho chọn lại NE (không cần re-login).
+ * Trả về 0 nếu connect thành công, -1 nếu user huỷ hoặc lỗi không phục hồi.
+ */
+static int select_and_connect_ne(void) {
+    LOG_DEBUG("fetching NE list for user=%s", g_mgt_user);
     printf("\nFetching NE list...\n");
     ne_item_t nes[NE_LIST_MAX];
     int ne_count = fetch_ne_list(g_mgt_token, nes);
     if (ne_count < 0) {
-        fprintf(stderr, "%sCould not fetch NE list. Use 'nodes' to retry.%s\n",
+        LOG_ERROR("fetch NE list failed for user=%s", g_mgt_user);
+        fprintf(stderr, "%sCould not fetch NE list.%s\n",
                 COLOR_RED, COLOR_RESET);
-        return;
+        return -1;
     }
     if (ne_count == 0) {
+        LOG_WARN("no NEs assigned to user=%s", g_mgt_user);
         printf("No NEs assigned to this user.\n");
-        return;
+        return -1;
     }
+    LOG_INFO("NE list: %d NEs available for user=%s", ne_count, g_mgt_user);
 
     display_ne_list(nes, ne_count);
 
-    int sel = select_ne_interactive(nes, ne_count);
-    if (sel < 0) {
-        printf("NE selection cancelled.\n");
-        return;
+    /* Loop chọn NE: nếu connect thất bại → hiển thị lại danh sách cho chọn lại */
+    while (1) {
+        int sel = select_ne_interactive(nes, ne_count);
+        if (sel < 0) {
+            printf("NE selection cancelled.\n");
+            return -1;
+        }
+
+        const ne_item_t *chosen = &nes[sel];
+
+        /* Dùng conf_master_ip / conf_port_master_tcp để kết nối ConfD MAAPI,
+         * fallback về ip/port nếu trường conf_* trống */
+        const char *conn_ip   = chosen->conf_master_ip[0] ? chosen->conf_master_ip : chosen->ip;
+        int         conn_port = chosen->conf_port_master_tcp ? chosen->conf_port_master_tcp : chosen->port;
+
+        printf("\nConnecting to %s%s%s (%s:%d)...\n",
+               COLOR_CYAN, chosen->ne, COLOR_RESET,
+               conn_ip, conn_port);
+
+        /* Đóng MAAPI session cũ */
+        if (g_maapi) {
+            cli_session_close(g_maapi);
+            g_maapi = NULL;
+        }
+        if (g_schema) {
+            schema_free(g_schema);
+            g_schema = NULL;
+        }
+
+        /* Kết nối MAAPI mới tới NE đã chọn */
+        const char *maapi_user = env_or("MAAPI_USER", "admin");
+        LOG_INFO("connecting to NE=%s (%s:%d) user=%s", chosen->ne, conn_ip, conn_port, g_mgt_user);
+        g_maapi = maapi_dial(conn_ip, conn_port, maapi_user);
+        if (!g_maapi) {
+            LOG_ERROR("MAAPI connect failed: NE=%s %s:%d", chosen->ne, conn_ip, conn_port);
+            fprintf(stderr, "%sMAAPI connect to %s:%d failed. Please select another NE.%s\n",
+                    COLOR_RED, conn_ip, conn_port, COLOR_RESET);
+            display_ne_list(nes, ne_count);
+            continue;  /* Cho chọn lại */
+        }
+
+        /* Cập nhật NE name + reload schema */
+        snprintf(g_ne_name, sizeof(g_ne_name), "%s", chosen->ne);
+        update_prompt();
+
+        printf("Loading schema...\n");
+        g_schema = schema_new_node("__root__");
+        if (g_schema) {
+            maapi_load_schema_into(g_maapi, &g_schema);
+            printf("Schema loaded.\n");
+        }
+
+        LOG_INFO("connected to NE=%s ns=%s (%s:%d) user=%s",
+                 chosen->ne, chosen->ns, conn_ip, conn_port, g_mgt_user);
+        printf("%sConnected to %s%s (%s:%d)%s\n",
+               COLOR_GREEN, chosen->ne,
+               chosen->ns[0] ? " " : "", chosen->ns,
+               conn_port, COLOR_RESET);
+        return 0;
     }
-
-    const ne_item_t *chosen = &nes[sel];
-
-    /* Dùng conf_master_ip / conf_port_master_tcp để kết nối ConfD MAAPI,
-     * fallback về ip/port nếu trường conf_* trống */
-    const char *conn_ip   = chosen->conf_master_ip[0] ? chosen->conf_master_ip : chosen->ip;
-    int         conn_port = chosen->conf_port_master_tcp ? chosen->conf_port_master_tcp : chosen->port;
-
-    printf("\nConnecting to %s%s%s (%s:%d)...\n",
-           COLOR_CYAN, chosen->ne, COLOR_RESET,
-           conn_ip, conn_port);
-
-    /* Đóng MAAPI session cũ */
-    if (g_maapi) {
-        cli_session_close(g_maapi);
-        g_maapi = NULL;
-    }
-    if (g_schema) {
-        schema_free(g_schema);
-        g_schema = NULL;
-    }
-
-    /* Kết nối MAAPI mới tới NE đã chọn */
-    const char *maapi_user = env_or("MAAPI_USER", "admin");
-    g_maapi = maapi_dial(conn_ip, conn_port, maapi_user);
-    if (!g_maapi) {
-        fprintf(stderr, "%sMAAPI connect to %s:%d failed.%s\n",
-                COLOR_RED, conn_ip, conn_port, COLOR_RESET);
-        return;
-    }
-
-    /* Cập nhật NE name + reload schema */
-    snprintf(g_ne_name, sizeof(g_ne_name), "%s", chosen->ne);
-    update_prompt();
-
-    printf("Loading schema...\n");
-    g_schema = schema_new_node("__root__");
-    if (g_schema) {
-        maapi_load_schema_into(g_maapi, &g_schema);
-        printf("Schema loaded.\n");
-    }
-
-    printf("%sConnected to %s%s (%s:%d)%s\n",
-           COLOR_GREEN, chosen->ne,
-           chosen->ns[0] ? " " : "", chosen->ns,
-           conn_port, COLOR_RESET);
 }
 
 /*
@@ -1568,6 +1614,7 @@ static void cmd_logout(void) {
         printf("Not logged in.\n");
         return;
     }
+    LOG_INFO("logout: user=%s", g_mgt_user);
     /* Wipe token để không bị peek qua /proc/<pid>/mem */
     memset(g_mgt_token, 0, sizeof(g_mgt_token));
     g_mgt_user[0] = '\0';
@@ -1716,6 +1763,7 @@ static void cmd_save(char **args, int argc) {
  * @param argc  Số lượng tham số
  */
 static void cmd_rollback(char **args, int argc) {
+    REQUIRE_MAAPI();
     if (argc == 0) {
         struct rollback_entry list[64];
         int n = maapi_do_list_rollbacks(g_maapi, list, 64);
@@ -1832,6 +1880,8 @@ static void dispatch(char *line) {
     char **argv = str_split(line, &argc);
     if (!argc) { free_tokens(argv, argc); return; }
 
+    LOG_DEBUG("cmd: user=%s ne=%s >> %s", g_mgt_user, g_ne_name, line);
+
     /* Bảng phân phối lệnh: so sánh không phân biệt hoa/thường */
     if      (strcasecmp(argv[0], "show")     == 0) cmd_show    (argv + 1, argc - 1);
     else if (strcasecmp(argv[0], "set")      == 0) cmd_set     (argv + 1, argc - 1);
@@ -1861,16 +1911,11 @@ static void dispatch(char *line) {
 /**
  * main - Điểm khởi đầu của chương trình CLI NETCONF.
  *
- * Luồng thực hiện chính:
- *   1. Cài đặt xử lý tín hiệu SIGINT (Ctrl+C)
- *   2. Cấu hình readline (tab-completion, lịch sử lệnh)
- *   3. Đọc cấu hình từ biến môi trường (địa chỉ, cổng, tên người dùng, tên NE)
- *   4. Kết nối tới ConfD qua MAAPI
- *   5. Tải cây schema YANG từ ConfD (phục vụ tab-completion và chuyển đổi đường dẫn)
- *   6. Vòng lặp chính: đọc lệnh từ readline -> dispatch -> xử lý
- *   7. Dọn dẹp tài nguyên khi thoát
+ * Hai chế độ hoạt động:
+ *   - Direct mode (debug): set CONFD_IPC_ADDR/CONFD_IPC_PORT → connect thẳng ConfD
+ *   - SSH server mode (mặc định): bắt buộc login mgt-svc → chọn NE → connect
  *
- * @return  0 nếu thành công, 1 nếu không kết nối được tới ConfD
+ * @return  0 nếu thành công, 1 nếu lỗi không phục hồi
  */
 int main(void) {
     /* Cài đặt handler cho SIGINT để Ctrl+C không thoát chương trình */
@@ -1882,46 +1927,185 @@ int main(void) {
     rl_attempted_completion_function = maapi_completer;  /* Đăng ký hàm tab-completion */
     rl_variable_bind("expand-tilde", "off");  /* Tắt mở rộng dấu ~ trong readline */
 
-    /* Đọc cấu hình kết nối từ biến môi trường */
-    const char *host = env_or("CONFD_IPC_ADDR", "127.0.0.1");
-    int         port = env_int_or("CONFD_IPC_PORT", CONFD_PORT);
-    const char *user = env_or("MAAPI_USER", "admin");
-    strncpy(g_ne_name, env_or("NE_NAME", "confd"), sizeof(g_ne_name) - 1);
+    log_init();
+
+    int direct_mode = (getenv("CONFD_IPC_ADDR") || getenv("CONFD_IPC_PORT"));
+    LOG_INFO("cli-netconf started, mode=%s", direct_mode ? "direct" : "ssh-server");
 
     /* Hiển thị banner chào mừng */
     printf("%s", COLOR_GREEN);
     printf("=====================================================\n");
-    printf("   CLI - NETCONF Console (C / MAAPI Direct Mode)\n");
+    if (direct_mode)
+        printf("   CLI - NETCONF Console (Direct Debug Mode)\n");
+    else
+        printf("   CLI - NETCONF Console\n");
     printf("=====================================================%s\n\n", COLOR_RESET);
 
-    /* Thiết lập kết nối MAAPI tới ConfD (tuỳ chọn — có thể login + chọn NE sau) */
-    if (getenv("CONFD_IPC_ADDR") || getenv("CONFD_IPC_PORT")) {
+    if (direct_mode) {
+        /* ── Direct mode: connect thẳng ConfD qua env vars (dùng khi debug) ── */
+        const char *host = env_or("CONFD_IPC_ADDR", "127.0.0.1");
+        int         port = env_int_or("CONFD_IPC_PORT", CONFD_PORT);
+        const char *user = env_or("MAAPI_USER", "admin");
+        strncpy(g_ne_name, env_or("NE_NAME", "confd"), sizeof(g_ne_name) - 1);
+
         printf("Connecting to ConfD MAAPI %s%s:%d%s ...\n",
                COLOR_BOLD, host, port, COLOR_RESET);
+        LOG_DEBUG("direct mode: connecting to %s:%d user=%s", host, port, user);
         g_maapi = maapi_dial(host, port, user);
         if (!g_maapi) {
-            fprintf(stderr, "%sMAAPI connect failed. Use 'login' to select a NE.%s\n",
+            LOG_ERROR("direct mode: MAAPI connect to %s:%d failed", host, port);
+            fprintf(stderr, "%sMAAPI connect failed. Is ConfD running?%s\n",
                     COLOR_RED, COLOR_RESET);
-        } else {
-            printf("%sConnected.%s\n", COLOR_GREEN, COLOR_RESET);
-            printf("Loading schema from MAAPI...\n");
-            g_schema = schema_new_node("__root__");
-            if (g_schema) {
-                maapi_load_schema_into(g_maapi, &g_schema);
-                printf("Schema loaded.\n");
-            }
+            log_close();
+            return 1;
+        }
+        LOG_INFO("direct mode: connected to %s:%d", host, port);
+        printf("%sConnected.%s\n", COLOR_GREEN, COLOR_RESET);
+        printf("Loading schema from MAAPI...\n");
+        g_schema = schema_new_node("__root__");
+        if (g_schema) {
+            maapi_load_schema_into(g_maapi, &g_schema);
+            printf("Schema loaded.\n");
         }
     } else {
-        printf("No CONFD_IPC_ADDR set. Use %slogin%s to connect via mgt-svc.\n",
-               COLOR_CYAN, COLOR_RESET);
+        /* ── SSH server mode: chọn NE trước khi vào CLI ── */
+
+        /* Kiểm tra token đã có sẵn từ PAM/SSH (env MGT_SVC_TOKEN + MGT_SVC_USER) */
+        const char *pre_token = getenv("MGT_SVC_TOKEN");
+        const char *pre_user  = getenv("MGT_SVC_USER");
+        if (pre_token && *pre_token && pre_user && *pre_user) {
+            /* PAM đã authenticate → dùng token có sẵn, nhảy thẳng vào chọn NE */
+            snprintf(g_mgt_token, sizeof(g_mgt_token), "%s", pre_token);
+            snprintf(g_mgt_user,  sizeof(g_mgt_user),  "%s", pre_user);
+            LOG_INFO("pre-authenticated via SSH: user=%s", g_mgt_user);
+            printf("Logged in as %s%s%s\n\n",
+                   COLOR_CYAN, g_mgt_user, COLOR_RESET);
+            fflush(stdout);
+
+            if (select_and_connect_ne() != 0) {
+                LOG_ERROR("NE selection failed for pre-auth user=%s", g_mgt_user);
+                printf("Cannot connect to any NE.\n");
+                log_close();
+                return 1;
+            }
+            goto cli_ready;
+        }
+
+        /* Không có token → hỏi login thủ công (fallback, chạy ngoài SSH) */
+        int logged_in = 0;
+        while (!logged_in) {
+            char *uline = readline("Username: ");
+            if (!uline) {
+                LOG_INFO("session aborted at username prompt (EOF)");
+                printf("\nGoodbye.\n");
+                log_close();
+                return 0;  /* Ctrl+D → thoát */
+            }
+            char *username = str_trim(uline);
+            if (!*username) { free(uline); continue; }
+
+            char *password = read_password("Password: ");
+            if (!password) {
+                LOG_INFO("session aborted at password prompt (EOF) user=%s", username);
+                free(uline);
+                printf("\nGoodbye.\n");
+                log_close();
+                return 0;
+            }
+
+            /* Authenticate với mgt-svc */
+            char *u_esc = json_escape(username);
+            char *p_esc = json_escape(password);
+            memset(password, 0, strlen(password));
+            free(password);
+
+            if (!u_esc || !p_esc) {
+                free(u_esc); free(p_esc); free(uline);
+                fprintf(stderr, "%sOut of memory%s\n", COLOR_RED, COLOR_RESET);
+                continue;
+            }
+
+            size_t blen = strlen(u_esc) + strlen(p_esc) + 64;
+            char *body = malloc(blen);
+            if (!body) { free(u_esc); free(p_esc); free(uline); continue; }
+            snprintf(body, blen,
+                     "{\"username\":\"%s\",\"password\":\"%s\"}", u_esc, p_esc);
+            free(u_esc);
+            memset(p_esc, 0, strlen(p_esc));
+            free(p_esc);
+
+            char url[1024];
+            mgt_endpoint(url, sizeof(url), "/aa/authenticate");
+
+            char *resp = NULL;
+            int status = http_post_json(url, body, NULL, &resp);
+            memset(body, 0, blen);
+            free(body);
+
+            LOG_INFO("login attempt: user=%s", username);
+
+            if (status < 0) {
+                LOG_ERROR("login: mgt-svc unreachable url=%s", url);
+                fprintf(stderr, "%sCannot reach mgt-svc%s (url=%s)\n",
+                        COLOR_RED, COLOR_RESET, url);
+                free(resp); free(uline);
+                continue;
+            }
+            if (status != 200) {
+                LOG_WARN("login failed: user=%s http=%d", username, status);
+                printf("%sLogin failed%s — HTTP %d\n", COLOR_RED, COLOR_RESET, status);
+                if (resp && *resp) fprintf(stderr, "%s\n", resp);
+                free(resp); free(uline);
+                continue;
+            }
+
+            char *token = json_extract_string(resp ? resp : "", "response_data");
+            char *st    = json_extract_string(resp ? resp : "", "status");
+            free(resp);
+
+            if (st && strcasecmp(st, "success") != 0) {
+                LOG_WARN("login failed: user=%s status=%s", username, st);
+                fprintf(stderr, "%sLogin failed%s — %s\n",
+                        COLOR_RED, COLOR_RESET, st);
+                free(token); free(st); free(uline);
+                continue;
+            }
+            if (!token || !*token) {
+                LOG_WARN("login failed: user=%s no token in response", username);
+                fprintf(stderr, "%sLogin failed — invalid response%s\n",
+                        COLOR_RED, COLOR_RESET);
+                free(token); free(st); free(uline);
+                continue;
+            }
+
+            snprintf(g_mgt_token, sizeof(g_mgt_token), "%s", token);
+            snprintf(g_mgt_user,  sizeof(g_mgt_user),  "%s", username);
+            free(token); free(st); free(uline);
+
+            LOG_INFO("login success: user=%s", g_mgt_user);
+            printf("%sLogged in%s as %s%s%s\n",
+                   COLOR_GREEN, COLOR_RESET,
+                   COLOR_CYAN, g_mgt_user, COLOR_RESET);
+
+            /* Chọn NE + connect MAAPI */
+            if (select_and_connect_ne() == 0) {
+                logged_in = 1;
+            } else {
+                /* Không chọn được NE → quay lại login */
+                memset(g_mgt_token, 0, sizeof(g_mgt_token));
+                g_mgt_user[0] = '\0';
+                printf("\n%sPlease login again.%s\n\n", COLOR_YELLOW, COLOR_RESET);
+            }
+        }
     }
 
+cli_ready:
     /* Khởi tạo prompt và lịch sử lệnh readline */
     update_prompt();
     using_history();
     stifle_history(HISTORY_SIZE);  /* Giới hạn số lệnh lưu trong lịch sử */
 
-    printf("Type %shelp%s for commands. Ctrl+D or %sexit%s to quit.\n\n",
+    printf("\nType %shelp%s for commands. Ctrl+D or %sexit%s to quit.\n\n",
            COLOR_CYAN, COLOR_RESET, COLOR_CYAN, COLOR_RESET);
 
     /* ── Vòng lặp chính: đọc và xử lý lệnh ── */
@@ -1942,8 +2126,10 @@ int main(void) {
     }
 
     /* Dọn dẹp tài nguyên trước khi thoát */
+    LOG_INFO("session ended: user=%s ne=%s", g_mgt_user, g_ne_name);
     printf("Goodbye.\n");
     if (g_schema)  schema_free(g_schema);
     if (g_maapi)   cli_session_close(g_maapi);
+    log_close();
     return 0;
 }
