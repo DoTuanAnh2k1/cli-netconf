@@ -1,11 +1,17 @@
 # =============================================================================
-# Dockerfile_cli_netconf_c — CLI NETCONF C rewrite
+# Dockerfile — CLI NETCONF C rewrite (SSH Server Mode)
 #
-# SSH Server Mode: OpenSSH server + xác thực qua mgt-service API.
-# User SSH vào container → PAM xác thực → cli-netconf tự hỏi login →
-# lấy danh sách NE từ mgt-service → user chọn NE → MAAPI connect.
+# Dùng base image `hsdfat/cli-netconf:ubuntu` (đã có sẵn gcc/make/openssh/…).
+# Không gọi apt — dùng được trong môi trường private offline.
 #
-# Runtime env vars (đặt trong docker-compose / docker run -e):
+# Build base (chỉ làm một lần, cần internet):
+#   docker build -f Dockerfile.base -t hsdfat/cli-netconf:ubuntu .
+#   docker push   hsdfat/cli-netconf:ubuntu
+#
+# Build app (offline OK, pull base từ registry):
+#   docker build -t cli-netconf:latest .
+#
+# Runtime env vars:
 #   MGT_SVC_BASE     — URL gốc mgt-service        (default: http://mgt-service:3000)
 #   LOG_LEVEL        — Log level                   (default: info)
 #   LOG_STDERR       — 1 = log ra terminal user    (default: 1)
@@ -17,46 +23,28 @@
 #   ssh <username>@<host> -p <SSH_PORT>
 # =============================================================================
 
-# ── Build stage ──────────────────────────────────────────────────────────────
-FROM ubuntu:24.04 AS builder
+FROM hsdfat/cli-netconf:ubuntu
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc make libxml2-dev libreadline-dev ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
+# ── Build binary ─────────────────────────────────────────────────────────────
 WORKDIR /build
 
-# Copy toàn bộ source từ build context (local cli-netconf repo)
-COPY src/ src/
+COPY src/     src/
 COPY include/ include/
 COPY Makefile .
-COPY libconfd-server.so libconfd.so
+COPY libconfd-server.so  libconfd.so
 COPY libcrypto-server.so libcrypto.so
 
-# Build với rpath trỏ thẳng tới /usr/lib/cli trong runtime container
 RUN make CONFD_LIB=/build/libconfd.so \
-         LDFLAGS="-lreadline -lxml2 -L/build -lconfd -lcrypto -Wl,-rpath,/usr/lib/cli"
-
-# ── Runtime stage ────────────────────────────────────────────────────────────
-FROM ubuntu:24.04
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        openssh-server \
-        libxml2 \
-        libreadline8 \
-        curl \
-        jq \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/run/sshd /usr/lib/cli
-
-# Binary + shared libraries
-COPY --from=builder /build/cli-netconf          /usr/local/bin/cli-netconf
-COPY --from=builder /build/libconfd.so          /usr/lib/cli/libconfd.so
-COPY --from=builder /build/libcrypto.so         /usr/lib/cli/libcrypto.so.1.0.0
-
-RUN ln -sf /usr/lib/cli/libcrypto.so.1.0.0 /usr/lib/cli/libcrypto.so.10 \
+         LDFLAGS="-lreadline -lxml2 -L/build -lconfd -lcrypto -Wl,-rpath,/usr/lib/cli" \
+    && install -m 755 cli-netconf /usr/local/bin/cli-netconf \
+    && install -m 755 libconfd.so  /usr/lib/cli/libconfd.so \
+    && install -m 755 libcrypto.so /usr/lib/cli/libcrypto.so.1.0.0 \
+    && ln -sf /usr/lib/cli/libcrypto.so.1.0.0 /usr/lib/cli/libcrypto.so.10 \
     && echo "/usr/lib/cli" > /etc/ld.so.conf.d/cli.conf \
-    && ldconfig
+    && ldconfig \
+    && rm -rf /build
+
+WORKDIR /
 
 # ── PAM auth script — xác thực user qua mgt-service API ─────────────────────
 COPY <<'AUTH_SCRIPT' /usr/local/bin/auth-mgt.sh

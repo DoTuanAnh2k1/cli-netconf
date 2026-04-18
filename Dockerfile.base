@@ -1,0 +1,26 @@
+# =============================================================================
+# Dockerfile.base — Base image cho cli-netconf
+#
+# Build: docker build -f Dockerfile.base -t hsdfat/cli-netconf:ubuntu .
+# Push:  docker push hsdfat/cli-netconf:ubuntu
+#
+# Image này chứa sẵn toàn bộ apt packages (build + runtime) để môi trường
+# private (không có internet → không chạy được apt) vẫn build được cli-netconf
+# từ Dockerfile chính chỉ bằng FROM hsdfat/cli-netconf:ubuntu.
+# =============================================================================
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        make \
+        libxml2-dev \
+        libreadline-dev \
+        ca-certificates \
+        openssh-server \
+        libxml2 \
+        libreadline8 \
+        curl \
+        jq \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/run/sshd /usr/lib/cli
