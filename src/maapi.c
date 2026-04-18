@@ -75,6 +75,20 @@ static void walk_cs_node(struct confd_cs_node *cs,
         child->is_leaf = (node->children == NULL) &&
                          !(node->info.flags & (CS_NODE_IS_LIST | CS_NODE_IS_CONTAINER));
 
+        /* Với list, lấy danh sách tên key từ node->info.keys (mảng uint32_t
+         * hash tags, kết thúc bằng 0). Dùng cho tab completion (ẩn key leaf)
+         * và validate trong cmd_set. */
+        if (child->is_list && node->info.keys) {
+            child->n_keys = 0;
+            for (int k = 0; node->info.keys[k] != 0 && k < MAX_LIST_KEYS; k++) {
+                const char *kname = confd_hash2str(node->info.keys[k]);
+                if (!kname) continue;
+                strncpy(child->keys[child->n_keys], kname, MAX_NAME_LEN - 1);
+                child->keys[child->n_keys][MAX_NAME_LEN - 1] = '\0';
+                child->n_keys++;
+            }
+        }
+
         /* Đệ quy vào các node con (chỉ khi không phải leaf) */
         if (!child->is_leaf) {
             walk_cs_node(node, child);

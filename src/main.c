@@ -510,9 +510,69 @@ static char **maapi_completer(const char *text, int start, int end) {
             /* "show running-config <TAB>" -> gợi ý đường dẫn schema */
             result = rl_completion_matches(text, path_generator);
         }
-    } else if (strcasecmp(cmd, "set") == 0 ||
-               strcasecmp(cmd, "unset") == 0) {
-        /* Sau "set" hoặc "unset": gợi ý đường dẫn schema YANG */
+    } else if (strcasecmp(cmd, "set") == 0) {
+        /* Sau "set": duyệt schema xem có chạm vào YANG list hay không.
+         *
+         * Cú pháp batch set list:
+         *   set <container...> <list-name> <key-value> [<leaf> <value> ...]
+         *
+         * Khi đã qua tên list → vị trí tiếp theo là key VALUE (do user tự
+         * gõ, không gợi ý). Sau key value là các cặp <leaf> <value> lặp lại;
+         * gợi ý chỉ xuất hiện ở vị trí leaf name, và chỉ liệt kê những leaf
+         *   - không phải key của list (key đã gõ qua key value)
+         *   - chưa xuất hiện trên dòng lệnh hiện tại
+         */
+        int confirmed = trailing ? count : count - 1;
+        int cur_idx   = trailing ? count : count - 1;  /* 0-based vị trí word đang gõ */
+
+        schema_node_t *n = g_schema;
+        schema_node_t *list_node = NULL;
+        int list_tok_idx = -1;
+        for (int i = 1; i < confirmed && n; i++) {
+            schema_node_t *found = NULL;
+            for (schema_node_t *c = n->children; c; c = c->next) {
+                if (strcasecmp(c->name, tokens[i]) == 0) { found = c; break; }
+            }
+            if (!found) break;
+            n = found;
+            if (found->is_list) {
+                list_node = found;
+                list_tok_idx = i;
+                break;  /* Không đi sâu qua list — các token sau là key/leaf */
+            }
+        }
+
+        if (list_node && list_tok_idx >= 0) {
+            int rel = cur_idx - list_tok_idx;
+            if (rel == 1) {
+                /* Key value — user tự gõ, không gợi ý */
+                result = NULL;
+            } else if (rel >= 2 && (rel % 2) == 0) {
+                /* Leaf name — build danh sách leaf chưa dùng, không phải key */
+                static const char *buf[64];
+                int bi = 0;
+                for (schema_node_t *c = list_node->children; c && bi < 63; c = c->next) {
+                    if (!c->is_leaf) continue;
+                    if (schema_is_key_leaf(list_node, c->name)) continue;
+                    bool used = false;
+                    for (int k = list_tok_idx + 2; k < confirmed; k += 2) {
+                        if (strcasecmp(tokens[k], c->name) == 0) { used = true; break; }
+                    }
+                    if (used) continue;
+                    buf[bi++] = c->name;
+                }
+                buf[bi] = NULL;
+                g_list_items = buf;
+                result = rl_completion_matches(text, list_generator);
+            } else {
+                /* Leaf value (rel lẻ >= 3) → không gợi ý */
+                result = NULL;
+            }
+        } else {
+            result = rl_completion_matches(text, path_generator);
+        }
+    } else if (strcasecmp(cmd, "unset") == 0) {
+        /* Unset vẫn dùng path_generator như cũ */
         result = rl_completion_matches(text, path_generator);
     } else if (strcasecmp(cmd, "dump") == 0) {
         /* Sau "dump": gợi ý định dạng xuất (text / xml) */
@@ -677,6 +737,9 @@ static void print_children_hint(schema_node_t *node) {
     fprintf(stderr, "  %savailable%s: ", COLOR_DIM, COLOR_RESET);
     bool first = true;
     for (schema_node_t *c = node->children; c; c = c->next) {
+        /* Ẩn key leaf khi node là list — key đã được cung cấp qua key value
+         * trong keypath ({john}), user không nên set lại leaf key bằng tên. */
+        if (node->is_list && schema_is_key_leaf(node, c->name)) continue;
         if (!first) fprintf(stderr, ", ");
         const char *tag = c->is_list ? " [list]"
                        : c->is_leaf ? ""
@@ -893,6 +956,14 @@ static void cmd_set(char **args, int argc) {
                             "%s'%s' không phải leaf trong list '%s'%s\n",
                             COLOR_RED, lname, child->name, COLOR_RESET);
                         print_children_hint(child);
+                        fail++;
+                        continue;
+                    }
+                    /* Không cho set lại key leaf — đã cung cấp qua key value */
+                    if (schema_is_key_leaf(child, lc->name)) {
+                        fprintf(stderr,
+                            "%s'%s' là key của list '%s' — đã được set qua key value, bỏ qua%s\n",
+                            COLOR_RED, lc->name, child->name, COLOR_RESET);
                         fail++;
                         continue;
                     }

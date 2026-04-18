@@ -25,14 +25,27 @@
  * Schema node — schema tree used for tab completion
  * Built from YANG via MAAPI load_schema.
  * ---------------------------------------------------------------------- */
+/* Số key tối đa của 1 YANG list — đủ cho compound key thực tế (ConfD dùng 9). */
+#define MAX_LIST_KEYS  8
+
 typedef struct schema_node {
     char              name[MAX_NAME_LEN];
     char              ns[MAX_NS_LEN];
     bool              is_list;     /* YANG list (has key) */
     bool              is_leaf;     /* leaf or leaf-list */
+    /* Tên các key leaf — chỉ có nghĩa khi is_list = true. n_keys = 0 nếu
+     * không phải list. Dùng để:
+     *   - ẩn key khỏi gợi ý tab completion sau khi user đã nhập key value
+     *   - validate batch set không cho set lại key leaf */
+    char              keys[MAX_LIST_KEYS][MAX_NAME_LEN];
+    int               n_keys;
     struct schema_node *children;  /* child list (linked list) */
     struct schema_node *next;      /* next sibling */
 } schema_node_t;
+
+/* Kiểm tra xem `leaf_name` có phải là 1 trong các key của list `list_node`
+ * (trả false nếu list_node không phải list hoặc không có key). */
+bool schema_is_key_leaf(const schema_node_t *list_node, const char *leaf_name);
 
 /* -------------------------------------------------------------------------
  * Forward declarations — schema.c

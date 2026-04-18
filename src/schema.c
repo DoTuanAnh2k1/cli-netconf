@@ -42,6 +42,18 @@ schema_node_t *schema_new_node(const char *name) {
 }
 
 /*
+ * schema_is_key_leaf — Kiểm tra leaf có phải là key của list không.
+ * Chỉ có nghĩa khi list_node->is_list. So sánh case-insensitive.
+ */
+bool schema_is_key_leaf(const schema_node_t *list_node, const char *leaf_name) {
+    if (!list_node || !leaf_name || !list_node->is_list) return false;
+    for (int i = 0; i < list_node->n_keys; i++) {
+        if (strcasecmp(list_node->keys[i], leaf_name) == 0) return true;
+    }
+    return false;
+}
+
+/*
  * schema_free — Giải phóng đệ quy toàn bộ cây schema
  *
  * Giải phóng node hiện tại, tất cả con (children) và anh em (next/sibling).
@@ -147,6 +159,11 @@ void schema_merge(schema_node_t *dst, schema_node_t *src) {
             dc->is_list = sc->is_list;
             dc->is_leaf = sc->is_leaf;
             strncpy(dc->ns, sc->ns, MAX_NS_LEN - 1);
+            dc->n_keys = sc->n_keys;
+            for (int k = 0; k < sc->n_keys; k++) {
+                strncpy(dc->keys[k], sc->keys[k], MAX_NAME_LEN - 1);
+                dc->keys[k][MAX_NAME_LEN - 1] = '\0';
+            }
             dc->next = dst->children;
             dst->children = dc;
         }
