@@ -82,8 +82,9 @@ static char             g_prompt[256];
 /* Tên thiết bị mạng (Network Element), hiển thị trong prompt */
 static char             g_ne_name[128] = "confd";
 
-/* Token JWT lấy từ mgt-svc sau khi login. Rỗng nếu chưa login.
- * Dùng cho header "Authorization: Basic <token>" trong mọi request kế tiếp. */
+/* Token lấy từ mgt-svc sau khi login (response_data). ĐÃ BAO GỒM tiền tố
+ * "Basic " theo spec API — dùng trực tiếp làm giá trị header Authorization.
+ * Rỗng nếu chưa login. */
 static char             g_mgt_token[4096] = "";
 
 /* Username đang đăng nhập (để hiển thị trên prompt sau login). */
@@ -1625,7 +1626,8 @@ static void cmd_logout(void) {
  * cmd_save - POST CLI operation history lên mgt-svc.
  *
  * API: POST /aa/history/save (mgt-svc swagger)
- *   Headers: Authorization: Basic <token>, Content-Type: application/json
+ *   Headers: Authorization: <token>, Content-Type: application/json
+ *            (token đã chứa sẵn prefix "Basic " từ response_data)
  *   Body:    { cmd_name, ne_name, ne_ip, scope?, result? }
  *
  * Cú pháp:
@@ -1639,7 +1641,7 @@ static void cmd_logout(void) {
  *
  * Env vars:
  *   MGT_SVC_URL    URL đầy đủ (mặc định: http://127.0.0.1:8080/aa/history/save)
- *   MGT_SVC_TOKEN  token cho header "Authorization: Basic <token>"
+ *   MGT_SVC_TOKEN  token cho header "Authorization" (đã có prefix "Basic ")
  */
 static void cmd_save(char **args, int argc) {
     const char *scope  = "ne-command";
@@ -1710,12 +1712,13 @@ static void cmd_save(char **args, int argc) {
     free(scope_esc); free(result_esc);
 
     /* Build Authorization header — ưu tiên token in-memory từ login,
-     * fallback về env MGT_SVC_TOKEN (cho automation/CI). */
+     * fallback về env MGT_SVC_TOKEN (cho automation/CI).
+     * Token đã có prefix "Basic " từ response_data, dùng nguyên. */
     char auth_hdr[8192] = "";
     const char *token = (*g_mgt_token) ? g_mgt_token : getenv("MGT_SVC_TOKEN");
     if (token && *token) {
         snprintf(auth_hdr, sizeof(auth_hdr),
-                 "Authorization: Basic %s\r\n", token);
+                 "Authorization: %s\r\n", token);
     } else {
         fprintf(stderr, "%sNot logged in%s — run %slogin <user>%s first.\n",
                 COLOR_YELLOW, COLOR_RESET, COLOR_CYAN, COLOR_RESET);
