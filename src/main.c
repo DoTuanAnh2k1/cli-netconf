@@ -660,70 +660,264 @@ static char *read_xml_paste(void) {
  * @param args  Mảng tham số (đường dẫn + giá trị)
  * @param argc  Số lượng tham số (0 = chế độ paste XML)
  */
+/*
+ * print_children_hint — In danh sách các con của một schema node ra stderr.
+ *
+ * Dùng để cung cấp gợi ý schema-aware khi user gõ sai cú pháp set/unset:
+ * nhờ đó user biết được tại vị trí hiện tại có thể gõ tiếp những tên nào,
+ * và loại của từng tên (leaf / list / container).
+ */
+static void print_children_hint(schema_node_t *node) {
+    if (!node || !node->children) return;
+    fprintf(stderr, "  %savailable%s: ", COLOR_DIM, COLOR_RESET);
+    bool first = true;
+    for (schema_node_t *c = node->children; c; c = c->next) {
+        if (!first) fprintf(stderr, ", ");
+        const char *tag = c->is_list ? " [list]"
+                       : c->is_leaf ? ""
+                       : " [container]";
+        fprintf(stderr, "%s%s", c->name, tag);
+        first = false;
+    }
+    fprintf(stderr, "\n");
+}
+
+/*
+ * do_single_set — Đặt 1 leaf duy nhất. Log + in kết quả.
+ * Trả về 0 nếu OK, -1 nếu fail.
+ */
+static int do_single_set(const char *kp, const char *value, const char *who) {
+    if (maapi_set_value_str(g_maapi, kp, value) == 0) {
+        LOG_INFO("set OK: user=%s ne=%s path=%s value=%s",
+                 who, g_ne_name, kp, value);
+        printf("%sOK%s %s %s=%s %s\n",
+               COLOR_GREEN, COLOR_RESET, kp, COLOR_DIM, value, COLOR_RESET);
+        return 0;
+    }
+    LOG_WARN("set FAILED: user=%s ne=%s path=%s value=%s",
+             who, g_ne_name, kp, value);
+    fprintf(stderr, "%sset failed%s %s\n", COLOR_RED, COLOR_RESET, kp);
+    return -1;
+}
+
+/**
+ * cmd_set — Xử lý lệnh "set". Hỗ trợ 3 chế độ:
+ *
+ *   1. Paste XML (argc == 0): đọc khối XML từ stdin, nạp vào candidate.
+ *
+ *   2. Keypath ConfD trực tiếp:
+ *        set /system/hostname edge-01
+ *        set /system/ntp/server{10.0.0.1}/prefer true
+ *
+ *   3. Token phân tách bằng dấu cách, duyệt schema để suy ra keypath:
+ *        set system hostname edge-01
+ *        set system ntp enabled true
+ *
+ *      Với YANG list, cú pháp là:
+ *        set <container...> <list-name> <key-value> [<leaf> <value> ...]
+ *      Ví dụ `list subscriber { key name; leaf role; leaf email; }`:
+ *        set eir subscriber john role admin
+ *        set eir subscriber john role admin email john@x.com   <- batch nhiều leaf
+ *      Không cần gõ tên key (`name`) thêm lần nữa vì `john` đã làm key.
+ *
+ * Lỗi cú pháp → in gợi ý schema-aware (các tên con tại vị trí hiện tại).
+ */
 static void cmd_set(char **args, int argc) {
     REQUIRE_MAAPI();
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
+
+    /* ── Chế độ paste XML ─────────────────────────────────────── */
     if (argc == 0) {
-        /* Chế độ paste XML: đọc khối XML từ stdin và nạp vào candidate */
         char *xml = read_xml_paste();
         if (!xml) return;
-        if (maapi_load_xml(g_maapi, xml) == 0)
+        if (maapi_load_xml(g_maapi, xml) == 0) {
+            LOG_INFO("set OK (paste XML): user=%s ne=%s", who, g_ne_name);
             printf("%sOK%s (staged in candidate)\n", COLOR_GREEN, COLOR_RESET);
-        else
+        } else {
+            LOG_WARN("set FAILED (paste XML): user=%s ne=%s", who, g_ne_name);
             fprintf(stderr, "%sload failed%s\n", COLOR_RED, COLOR_RESET);
+        }
         free(xml);
         return;
     }
 
-    /*
-     * Hai cú pháp:
-     *   set system ntp enabled true          <- phân tách bằng dấu cách (giống Go CLI)
-     *   set /system/ntp/enabled true         <- keypath ConfD (cú pháp cũ)
-     */
-    const char *value = NULL;
-    char *keypath = NULL;
-
+    /* ── Chế độ keypath ConfD trực tiếp ───────────────────────── */
     if (args[0][0] == '/') {
-        /* Cú pháp keypath ConfD: truyền thẳng đường dẫn, không cần chuyển đổi */
         if (argc < 2) {
-            printf("Usage: set <path...> <value>\n"
-                   "Example: set system ntp enabled true\n"
-                   "         set system ntp server 10.0.0.1 prefer true\n");
+            fprintf(stderr,
+                "%sUsage (keypath)%s: set <keypath> <value>\n"
+                "  eg: set /system/hostname edge-01\n"
+                "      set /system/ntp/server{10.0.0.1}/prefer true\n",
+                COLOR_RED, COLOR_RESET);
             return;
         }
-        keypath = strdup(args[0]);
-        value   = args[1];
-    } else {
-        /* Cú pháp dấu cách: chuyển đổi chuỗi token thành keypath ConfD qua cây schema */
-        int consumed = 0;
-        keypath = args_to_keypath(g_schema, args, argc, &consumed);
-        if (!keypath || consumed == 0) {
-            fprintf(stderr, "%sPath not found in schema%s\n",
-                    COLOR_RED, COLOR_RESET);
-            free(keypath);
-            return;
-        }
-        /* Kiểm tra xem sau đường dẫn còn token nào làm giá trị hay không */
-        if (consumed >= argc) {
-            printf("Usage: set <path...> <value>\n"
-                   "Example: set system hostname new-name\n");
-            free(keypath);
-            return;
-        }
-        value = args[consumed];  /* Token tiếp theo sau đường dẫn là giá trị cần đặt */
+        do_single_set(args[0], args[1], who);
+        return;
     }
 
-    /* Gọi MAAPI để đặt giá trị vào candidate datastore */
-    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
-    if (maapi_set_value_str(g_maapi, keypath, value) == 0) {
-        LOG_INFO("set OK: user=%s ne=%s path=%s value=%s",
-                 who, g_ne_name, keypath, value);
-        printf("%sOK%s\n", COLOR_GREEN, COLOR_RESET);
-    } else {
-        LOG_WARN("set FAILED: user=%s ne=%s path=%s value=%s",
-                 who, g_ne_name, keypath, value);
-        fprintf(stderr, "%sset failed%s\n", COLOR_RED, COLOR_RESET);
+    /* ── Chế độ token: duyệt schema tree ─────────────────────── */
+    size_t cap = 512;
+    char  *kp  = malloc(cap);
+    if (!kp) return;
+    size_t len = 0;
+    kp[0] = '\0';
+
+    schema_node_t *node = g_schema;   /* Node hiện tại trong schema */
+    int i = 0;
+
+    while (i < argc) {
+        const char *token = args[i];
+
+        /* Tìm child có tên khớp (case-insensitive) */
+        schema_node_t *child = NULL;
+        for (schema_node_t *c = node->children; c; c = c->next) {
+            if (strcasecmp(c->name, token) == 0) { child = c; break; }
+        }
+
+        if (!child) {
+            fprintf(stderr, "%sUnknown node '%s'%s at path %s\n",
+                    COLOR_RED, token, COLOR_RESET, *kp ? kp : "/");
+            print_children_hint(node);
+            free(kp);
+            return;
+        }
+
+        /* Nối tên node vào keypath */
+        size_t needed = len + 1 + strlen(child->name) + 1;
+        while (needed >= cap) { cap *= 2; kp = realloc(kp, cap); }
+        len += (size_t)snprintf(kp + len, cap - len, "/%s", child->name);
+        i++;
+
+        /* ── LEAF: token kế tiếp là giá trị, kết thúc ──────── */
+        if (child->is_leaf) {
+            if (i >= argc) {
+                fprintf(stderr,
+                    "%sMissing value for leaf '%s'%s\n"
+                    "  eg: set ... %s <value>\n",
+                    COLOR_RED, child->name, COLOR_RESET, child->name);
+                free(kp);
+                return;
+            }
+            if (i + 1 < argc) {
+                fprintf(stderr,
+                    "%sLeaf '%s' chỉ nhận 1 giá trị, có thừa: '%s'...%s\n"
+                    "  eg: set ... %s <value>\n",
+                    COLOR_RED, child->name, args[i+1], COLOR_RESET,
+                    child->name);
+                free(kp);
+                return;
+            }
+            do_single_set(kp, args[i], who);
+            free(kp);
+            return;
+        }
+
+        /* ── LIST: token kế tiếp là key value ──────────────── */
+        if (child->is_list) {
+            if (i >= argc) {
+                fprintf(stderr,
+                    "%sMissing key value for list '%s'%s\n"
+                    "  eg: set %s <key> [<leaf> <value> ...]\n",
+                    COLOR_RED, child->name, COLOR_RESET, kp);
+                print_children_hint(child);
+                free(kp);
+                return;
+            }
+            const char *key = args[i];
+            size_t kneeded = len + strlen(key) + 3;
+            while (kneeded >= cap) { cap *= 2; kp = realloc(kp, cap); }
+            len += (size_t)snprintf(kp + len, cap - len, "{%s}", key);
+            i++;
+            node = child;  /* Xuống list entry (children = leaves của list) */
+
+            /* Không còn arg → chỉ tạo entry rỗng → không khả thi qua set đơn.
+             * Yêu cầu user cung cấp ít nhất 1 leaf/value. */
+            if (i >= argc) {
+                fprintf(stderr,
+                    "%sList entry '%s{%s}' cần ít nhất 1 leaf/value%s\n"
+                    "  eg: set %s <leaf> <value> [<leaf> <value> ...]\n",
+                    COLOR_RED, child->name, key, COLOR_RESET, kp);
+                print_children_hint(child);
+                free(kp);
+                return;
+            }
+
+            /* Peek token kế tiếp: nếu là LEAF con của list → batch mode.
+             * Nếu là container / nested list → tiếp tục duyệt xuống. */
+            schema_node_t *peek = NULL;
+            for (schema_node_t *c = child->children; c; c = c->next) {
+                if (strcasecmp(c->name, args[i]) == 0) { peek = c; break; }
+            }
+
+            if (peek && peek->is_leaf) {
+                /* ── BATCH: remaining = <leaf> <value> cặp đôi ─ */
+                int remaining = argc - i;
+                if (remaining % 2 != 0) {
+                    fprintf(stderr,
+                        "%sCần số chẵn token (cặp <leaf> <value>), có %d%s\n"
+                        "  eg: set %s role admin email john@x.com\n",
+                        COLOR_RED, remaining, COLOR_RESET, kp);
+                    print_children_hint(child);
+                    free(kp);
+                    return;
+                }
+
+                int ok = 0, fail = 0;
+                for (int j = i; j + 1 < argc; j += 2) {
+                    const char *lname = args[j];
+                    const char *lval  = args[j+1];
+
+                    /* Kiểm tra leaf có tồn tại trong list */
+                    schema_node_t *lc = NULL;
+                    for (schema_node_t *c = child->children; c; c = c->next) {
+                        if (strcasecmp(c->name, lname) == 0) { lc = c; break; }
+                    }
+                    if (!lc || !lc->is_leaf) {
+                        fprintf(stderr,
+                            "%s'%s' không phải leaf trong list '%s'%s\n",
+                            COLOR_RED, lname, child->name, COLOR_RESET);
+                        print_children_hint(child);
+                        fail++;
+                        continue;
+                    }
+
+                    /* Ghép full keypath = kp + "/" + leaf_name */
+                    size_t fp_cap = len + strlen(lc->name) + 2;
+                    char *fp = malloc(fp_cap);
+                    if (!fp) { fail++; continue; }
+                    snprintf(fp, fp_cap, "%s/%s", kp, lc->name);
+
+                    if (do_single_set(fp, lval, who) == 0) ok++;
+                    else fail++;
+                    free(fp);
+                }
+
+                if (fail == 0)
+                    printf("%sDone%s — %d leaf(s) set under %s\n",
+                           COLOR_GREEN, COLOR_RESET, ok, kp);
+                else
+                    printf("%s%d OK, %d failed%s under %s\n",
+                           COLOR_YELLOW, ok, fail, COLOR_RESET, kp);
+                free(kp);
+                return;
+            }
+
+            /* peek không phải leaf → tiếp tục vòng lặp, sẽ duyệt nested node
+             * (container/nested list) ở iteration kế tiếp. */
+            continue;
+        }
+
+        /* ── CONTAINER: đi sâu xuống ───────────────────────── */
+        node = child;
     }
-    free(keypath);
+
+    /* Thoát loop mà chưa gặp leaf/list-với-value → đường dẫn chưa đủ */
+    fprintf(stderr,
+        "%sĐường dẫn chưa đầy đủ — cần trỏ tới leaf hoặc list%s\n"
+        "  at: %s\n",
+        COLOR_RED, COLOR_RESET, *kp ? kp : "/");
+    print_children_hint(node);
+    free(kp);
 }
 
 /**

@@ -215,6 +215,8 @@ show running-config [path...]      Xem cấu hình running
 show candidate-config [path...]    Xem cấu hình candidate
 
 set <path...> <value>              Đặt giá trị leaf
+set <path...> <list-name> <key>    Tạo list entry + batch-set nhiều leaf
+    <leaf1> <v1> [<leaf2> <v2>...]
 set                                Paste XML config (dòng trống để kết thúc)
 
 unset <path...>                    Xoá node
@@ -258,10 +260,45 @@ set eir nsmfPduSession is-enabled true
 unset eir networkConfig
 ```
 
+### Set với YANG list
+
+YANG:
+```yang
+list subscriber {
+  key name;
+  leaf name  { type string; }
+  leaf role  { type string; }
+  leaf email { type string; }
+}
+```
+
+Cú pháp: `set <container...> <list-name> <key-value> [<leaf> <value> ...]`
+
+- **Chỉ cần gõ key value một lần** — không phải lặp lại tên key (`name`) nữa
+  vì ConfD tự lưu key từ `{john}` trong path.
+- **Batch**: sau key value, có thể truyền nhiều cặp `<leaf> <value>` để set
+  luôn tất cả trong một lệnh.
+
+```
+# Đặt 1 leaf
+set eir subscriber john role admin
+
+# Đặt nhiều leaf trong một phát (tạo luôn entry với key=john nếu chưa có)
+set eir subscriber john role admin email john@x.com
+```
+
+Lỗi cú pháp sẽ in ra danh sách các tên con tại vị trí hiện tại, ví dụ:
+
+```
+Unknown node 'rol' at path /eir/subscriber{john}
+  available: name, role [list], email, groups [list]
+```
+
 ### ConfD keypath (legacy)
 
 ```
 set /eir/nsmfPduSession/is-enabled true
+set /eir/subscriber{john}/role admin
 unset /eir/networkConfig
 ```
 
