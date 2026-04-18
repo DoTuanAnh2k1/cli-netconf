@@ -1679,7 +1679,7 @@ static void cmd_logout(void) {
  * Mặc định lấy từ:
  *   ne_name  ← env NE_NAME (g_ne_name)
  *   ne_ip    ← env NE_IP, fallback ConfD host
- *   scope    ← "ne-command"
+ *   scope    ← "ne-config" (để mgt-svc filter riêng history config NE)
  *   result   ← "success"
  *
  * Env vars:
@@ -1687,7 +1687,7 @@ static void cmd_logout(void) {
  *   MGT_SVC_TOKEN  token cho header "Authorization" (đã có prefix "Basic ")
  */
 static void cmd_save(char **args, int argc) {
-    const char *scope  = "ne-command";
+    const char *scope  = "ne-config";
     const char *result = "success";
     const char *ne     = g_ne_name;
     const char *ne_ip  = env_or("NE_IP", g_maapi ? g_maapi->host : "");
