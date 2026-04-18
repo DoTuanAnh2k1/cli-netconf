@@ -132,6 +132,19 @@ static long elapsed_ms(struct timeval *t0) {
 }
 
 /**
+ * print_done - In footer chung sau khi lệnh kết thúc: duration + timestamp.
+ * Format: "(12ms, 2026-04-18 14:30:45)" bằng COLOR_DIM.
+ */
+static void print_done(long ms) {
+    char ts[32];
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+    printf("%s(%ldms, %s)%s\n", COLOR_DIM, ms, ts, COLOR_RESET);
+}
+
+/**
  * sigint_handler - Xử lý tín hiệu SIGINT (Ctrl+C).
  *
  * Thay vì thoát chương trình, handler này xoá dòng lệnh hiện tại
@@ -564,8 +577,7 @@ static void cmd_show(char **args, int argc) {
     }
     free(header);
     free(text);
-    /* Hiển thị thời gian thực hiện */
-    printf("%s(%ldms)%s\n", COLOR_DIM, ms, COLOR_RESET);
+    print_done(ms);
 }
 
 /**
@@ -729,11 +741,12 @@ static void cmd_unset(char **args, int argc) {
 static void cmd_commit(void) {
     REQUIRE_MAAPI();
     struct timeval t0; gettimeofday(&t0, NULL);
-    if (maapi_do_commit(g_maapi) == 0)
-        printf("%sCommit successful.%s (%ldms)\n",
-               COLOR_GREEN, COLOR_RESET, elapsed_ms(&t0));
-    else
+    if (maapi_do_commit(g_maapi) == 0) {
+        printf("%sCommit successful.%s\n", COLOR_GREEN, COLOR_RESET);
+        print_done(elapsed_ms(&t0));
+    } else {
         fprintf(stderr, "%sCommit failed.%s\n", COLOR_RED, COLOR_RESET);
+    }
 }
 
 /**

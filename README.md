@@ -293,8 +293,11 @@ running-config eir nsmfPduSession
 	timeout
 		idle 300
 		hard 3600
-(12ms)
+(12ms, 2026-04-18 14:30:45)
 ```
+
+Dòng cuối = `(duration, timestamp)` — duration là thời gian thực hiện,
+timestamp là thời điểm lệnh kết thúc (cũng áp dụng cho `commit`).
 
 List entry (có sibling cùng tên) in kèm key ngay cạnh tên:
 
@@ -307,6 +310,7 @@ running-config servers
 	server ntp2
 		name ntp2
 		address 10.0.0.2
+(8ms, 2026-04-18 14:30:52)
 ```
 
 ---
