@@ -14,3 +14,4 @@
 # General
 *.exe
 .claude/*
+confd/*

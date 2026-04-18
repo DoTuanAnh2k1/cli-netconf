@@ -1927,6 +1927,22 @@ int main(void) {
     rl_attempted_completion_function = maapi_completer;  /* Đăng ký hàm tab-completion */
     rl_variable_bind("expand-tilde", "off");  /* Tắt mở rộng dấu ~ trong readline */
 
+    /* Nạp env từ file trước tiên — sshd child không kế thừa env container.
+     * setenv(..., 0) nên env truyền qua exec vẫn được ưu tiên. */
+    load_env_file("/etc/cli-netconf/env");
+
+    /* Per-user log file nếu chưa set */
+    if (!getenv("LOG_FILE")) {
+        const char *u = getenv("USER");
+        if (!u || !*u) u = getenv("LOGNAME");
+        if (u && *u) {
+            char log_path[256];
+            snprintf(log_path, sizeof(log_path),
+                     "/var/log/cli-netconf/%s.log", u);
+            setenv("LOG_FILE", log_path, 0);
+        }
+    }
+
     log_init();
 
     int direct_mode = (getenv("CONFD_IPC_ADDR") || getenv("CONFD_IPC_PORT"));
