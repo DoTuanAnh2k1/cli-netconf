@@ -98,6 +98,11 @@ static char             g_cli_user[128] = "admin";
  * nên admin biết ai/ở đâu gõ lệnh gì. */
 static char             g_rhost[64] = "";
 
+/* Set khi user gõ "exit"/"quit" ở màn chọn NE → thoát hẳn program thay vì
+ * quay lại login / show NE list lại. Ctrl+D vẫn dùng chung nhánh "sel < 0"
+ * nhưng không set flag → giữ được hành vi cancel cũ nơi cần. */
+static int              g_quit_requested = 0;
+
 /**
  * init_rhost - Khởi tạo g_rhost từ biến môi trường SSH_CLIENT.
  *
@@ -1649,6 +1654,15 @@ static int select_ne_interactive(const ne_item_t *list, int count) {
         char *trimmed = str_trim(input);
         if (!*trimmed) { free(input); continue; }
 
+        /* User gõ "exit" / "quit" ở màn chọn NE → thoát hẳn program. Đặt flag
+         * để tầng ngoài biết đây là quit chủ động, phân biệt với cancel (-1). */
+        if (strcasecmp(trimmed, "exit") == 0 ||
+            strcasecmp(trimmed, "quit") == 0) {
+            g_quit_requested = 1;
+            free(input);
+            return -1;
+        }
+
         /* Thử parse số */
         char *endp;
         long idx = strtol(trimmed, &endp, 10);
@@ -1665,7 +1679,7 @@ static int select_ne_interactive(const ne_item_t *list, int count) {
             }
         }
 
-        printf("%sInvalid selection '%s'.%s Enter 1-%d or a namespace.\n",
+        printf("%sInvalid selection '%s'.%s Enter 1-%d or a namespace, or 'exit' to quit.\n",
                COLOR_RED, trimmed, COLOR_RESET, count);
         free(input);
     }
@@ -1861,7 +1875,7 @@ static int select_and_connect_ne(void) {
     while (1) {
         int sel = select_ne_interactive(nes, ne_count);
         if (sel < 0) {
-            printf("NE selection cancelled.\n");
+            if (!g_quit_requested) printf("NE selection cancelled.\n");
             return -1;
         }
 
@@ -2346,10 +2360,15 @@ int main(void) {
             fflush(stdout);
 
             if (select_and_connect_ne() != 0) {
-                LOG_ERROR("NE selection failed for pre-auth user=%s", g_mgt_user);
-                printf("Cannot connect to any NE.\n");
+                if (g_quit_requested) {
+                    LOG_INFO("exit from NE select: user=%s", g_mgt_user);
+                    printf("Goodbye.\n");
+                } else {
+                    LOG_ERROR("NE selection failed for pre-auth user=%s", g_mgt_user);
+                    printf("Cannot connect to any NE.\n");
+                }
                 log_close();
-                return 1;
+                return g_quit_requested ? 0 : 1;
             }
             goto cli_ready;
         }
@@ -2453,6 +2472,11 @@ int main(void) {
             /* Chọn NE + connect MAAPI */
             if (select_and_connect_ne() == 0) {
                 logged_in = 1;
+            } else if (g_quit_requested) {
+                /* User gõ "exit" ở màn chọn NE → thoát hẳn, không retry login */
+                printf("Goodbye.\n");
+                log_close();
+                return 0;
             } else {
                 /* Không chọn được NE → quay lại login */
                 memset(g_mgt_token, 0, sizeof(g_mgt_token));
@@ -2499,6 +2523,10 @@ cli_ready:
             dispatch(trimmed);  /* Phân phối lệnh tới hàm xử lý tương ứng */
         }
         free(line);
+        /* Trong dispatch có thể gọi login → select_and_connect_ne → user gõ
+         * "exit" ở màn chọn NE. Flag này cho phép thoát chương trình ngay
+         * thay vì tiếp tục vào CLI loop với state nửa chừng. */
+        if (g_quit_requested) break;
     }
 
     /* Dọn dẹp tài nguyên trước khi thoát */
