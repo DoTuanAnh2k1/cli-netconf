@@ -549,18 +549,22 @@ static void cmd_show(char **args, int argc) {
     char *text = fmt_xml_to_text(xml, path, path_len);
     free(xml);
 
-    /* Dòng đầu = path: "<datastore> <a> <b> ..." (dấu cách phân tầng).
+    /* Dòng đầu = path filter (bỏ tên datastore — không in "running-config"/
+     * "candidate-config"). Không có filter → không có dòng path.
      * Các dòng sau = cây config (mỗi cấp = 1 tab). */
-    size_t header_cap = 32;
-    for (int i = 0; i < argc; i++) header_cap += strlen(args[i]) + 1;
-    char *header = malloc(header_cap);
-    if (header) {
-        size_t off = 0;
-        for (int i = 0; i < argc; i++) {
-            off += snprintf(header + off, header_cap - off,
-                            "%s%s", i > 0 ? " " : "", args[i]);
+    char *header = NULL;
+    if (path_len > 0) {
+        size_t header_cap = 2;
+        for (int i = 0; i < path_len; i++) header_cap += strlen(path[i]) + 1;
+        header = malloc(header_cap);
+        if (header) {
+            size_t off = 0;
+            for (int i = 0; i < path_len; i++) {
+                off += snprintf(header + off, header_cap - off,
+                                "%s%s", i > 0 ? " " : "", path[i]);
+            }
+            snprintf(header + off, header_cap - off, "\n");
         }
-        snprintf(header + off, header_cap - off, "\n");
     }
 
     size_t tlen = text ? strlen(text) : 0;
@@ -2179,17 +2183,30 @@ cli_ready:
     printf("\nType %shelp%s for commands. Ctrl+D or %sexit%s to quit.\n\n",
            COLOR_CYAN, COLOR_RESET, COLOR_CYAN, COLOR_RESET);
 
-    /* ── Vòng lặp chính: đọc và xử lý lệnh ── */
+    /* ── Vòng lặp chính: đọc và xử lý lệnh ──
+     * Trong SSH server mode, "exit" KHÔNG thoát chương trình mà quay lại
+     * màn hình chọn NE. Chỉ Ctrl+D (readline trả NULL) mới thoát hẳn.
+     * Direct mode không có khái niệm NE select → "exit" thoát luôn. */
     char *line;
     while ((line = readline(g_prompt)) != NULL) {
         char *trimmed = str_trim(line);  /* Loại bỏ khoảng trắng đầu/cuối */
         if (*trimmed) {
             add_history(trimmed);  /* Lưu lệnh vào lịch sử (cho phím mũi tên lên/xuống) */
-            /* Kiểm tra lệnh thoát */
             if (strcasecmp(trimmed, "exit") == 0 ||
                 strcasecmp(trimmed, "quit") == 0) {
                 free(line);
-                break;
+                if (direct_mode) break;  /* Direct: thoát chương trình */
+
+                /* SSH server mode: đóng MAAPI hiện tại, quay về chọn NE. */
+                LOG_INFO("exit from NE=%s → back to NE select", g_ne_name);
+                if (g_maapi)  { cli_session_close(g_maapi); g_maapi = NULL; }
+                if (g_schema) { schema_free(g_schema);     g_schema = NULL; }
+                if (select_and_connect_ne() != 0) {
+                    /* User Ctrl+D ở select hoặc không còn NE nào kết nối được → thoát */
+                    break;
+                }
+                update_prompt();
+                continue;
             }
             dispatch(trimmed);  /* Phân phối lệnh tới hàm xử lý tương ứng */
         }

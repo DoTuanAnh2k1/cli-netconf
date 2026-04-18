@@ -241,7 +241,9 @@ save [--scope=X] <cmd_name>        POST CLI history lên mgt-svc
                                       enum: cli-config | ne-command | ne-config)
 
 help                               Danh sách lệnh
-exit                               Thoát
+exit                               Trong SSH mode: quay về màn chọn NE.
+                                     Direct mode: thoát chương trình.
+                                     Ctrl+D thoát hẳn ra SSH.
 ```
 
 ---
@@ -281,20 +283,22 @@ Ví dụ: `anhdt195[smf-01]>`
 
 ## Config output format
 
-`show running-config [path...]` in ra cây config với 2 quy ước:
+`show running-config [path...]` in ra cây config với 3 quy ước:
 
-1. **Dòng đầu = path** — datastore + các phần tử path cách nhau bởi space.
+1. **Dòng đầu = path filter** — các phần tử path cách nhau bởi space.
+   Không có filter → không có dòng path.
 2. **Các dòng sau = cây config** — mỗi cấp thụt vào 1 ký tự `\t`. Các leaf
    cùng 1 container luôn có số tab bằng nhau.
+3. **Leaf = `name: value`** — dấu `:` phân tách tên và giá trị.
 
 ```
 anhdt195[eir]> show running-config eir nsmfPduSession
-running-config eir nsmfPduSession
-	is-enabled true
-	max-sessions 100
+eir nsmfPduSession
+	is-enabled: true
+	max-sessions: 100
 	timeout
-		idle 300
-		hard 3600
+		idle: 300
+		hard: 3600
 (12ms, 2026-04-18 14:30:45)
 ```
 
@@ -305,13 +309,13 @@ List entry (có sibling cùng tên) in kèm key ngay cạnh tên:
 
 ```
 anhdt195[eir]> show running-config servers
-running-config servers
+servers
 	server ntp1
-		name ntp1
-		address 10.0.0.1
+		name: ntp1
+		address: 10.0.0.1
 	server ntp2
-		name ntp2
-		address 10.0.0.2
+		name: ntp2
+		address: 10.0.0.2
 (8ms, 2026-04-18 14:30:52)
 ```
 

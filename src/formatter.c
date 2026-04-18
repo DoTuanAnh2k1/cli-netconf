@@ -338,12 +338,12 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
     for (int i = 0; i < pad_lvl; i++) pad[i] = '\t';
 
     if (!node_has_element_children(node)) {
-        /* Leaf: "\t*N <name> <value>" */
+        /* Leaf: "\t*N <name>: <value>" */
         xmlChar *content = xmlNodeGetContent(node);
         if (first_pass) {
             /* (chưa dùng) */
         } else {
-            sb_printf(sb, "%s%s %s\n",
+            sb_printf(sb, "%s%s: %s\n",
                       pad, name,
                       content ? (char *)content : "");
         }
