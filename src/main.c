@@ -90,6 +90,9 @@ static char             g_mgt_token[4096] = "";
 /* Username đang đăng nhập (để hiển thị trên prompt sau login). */
 static char             g_mgt_user[128] = "";
 
+/* Username dùng trong prompt CLI — lấy từ MAAPI_USER/USER env tại startup. */
+static char             g_cli_user[128] = "admin";
+
 /* ─── Hàm tiện ích (Helpers) ─────────────────────────────────── */
 
 /**
@@ -147,12 +150,13 @@ static void sigint_handler(int sig) {
 /**
  * update_prompt - Cập nhật chuỗi prompt hiển thị trên dòng lệnh.
  *
- * Định dạng: "maapi[<tên_thiết_bị>]> " với màu sắc ANSI.
+ * Định dạng: "<user>[<tên_thiết_bị>]> " với màu sắc ANSI.
+ * <user> lấy từ g_cli_user (MAAPI_USER/USER env tại startup).
  */
 static void update_prompt(void) {
     snprintf(g_prompt, sizeof(g_prompt),
-             "%smaapi%s[%s%s%s]> ",
-             COLOR_CYAN, COLOR_RESET,
+             "%s%s%s[%s%s%s]> ",
+             COLOR_CYAN, g_cli_user, COLOR_RESET,
              COLOR_YELLOW, g_ne_name, COLOR_RESET);
 }
 
@@ -531,7 +535,34 @@ static void cmd_show(char **args, int argc) {
     /* Chuyển đổi XML thô thành dạng text có thụt lề dễ đọc */
     char *text = fmt_xml_to_text(xml, path, path_len);
     free(xml);
-    paged_print(text);
+
+    /* Dòng đầu = path: "<datastore> <a> <b> ..." (dấu cách phân tầng).
+     * Các dòng sau = cây config (mỗi cấp = 1 tab). */
+    size_t header_cap = 32;
+    for (int i = 0; i < argc; i++) header_cap += strlen(args[i]) + 1;
+    char *header = malloc(header_cap);
+    if (header) {
+        size_t off = 0;
+        for (int i = 0; i < argc; i++) {
+            off += snprintf(header + off, header_cap - off,
+                            "%s%s", i > 0 ? " " : "", args[i]);
+        }
+        snprintf(header + off, header_cap - off, "\n");
+    }
+
+    size_t tlen = text ? strlen(text) : 0;
+    size_t hlen = header ? strlen(header) : 0;
+    char *combined = malloc(hlen + tlen + 1);
+    if (combined) {
+        if (header) memcpy(combined, header, hlen);
+        if (text)   memcpy(combined + hlen, text, tlen);
+        combined[hlen + tlen] = '\0';
+        paged_print(combined);
+        free(combined);
+    } else {
+        paged_print(text);
+    }
+    free(header);
     free(text);
     /* Hiển thị thời gian thực hiện */
     printf("%s(%ldms)%s\n", COLOR_DIM, ms, COLOR_RESET);
@@ -1947,6 +1978,15 @@ int main(void) {
     }
 
     log_init();
+
+    /* Lấy username cho prompt: MAAPI_USER (wrapper set) → USER → "admin". */
+    {
+        const char *u = env_or("MAAPI_USER", NULL);
+        if (!u) u = env_or("USER", NULL);
+        if (!u) u = env_or("LOGNAME", "admin");
+        strncpy(g_cli_user, u, sizeof(g_cli_user) - 1);
+        g_cli_user[sizeof(g_cli_user) - 1] = '\0';
+    }
 
     int direct_mode = (getenv("CONFD_IPC_ADDR") || getenv("CONFD_IPC_PORT"));
     LOG_INFO("cli-netconf started, mode=%s", direct_mode ? "direct" : "ssh-server");

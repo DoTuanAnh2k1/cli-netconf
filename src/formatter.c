@@ -243,17 +243,35 @@ static void sb_printf(strbuf_t *sb, const char *fmt, ...) {
  * Trả về:
  *   Chuỗi giá trị key (malloc'd, caller phải free), hoặc NULL.
  */
+/* Heuristic phát hiện list entry: có sibling cùng tên. Không có schema nên
+ * list 1 phần tử sẽ bị nhận nhầm là container — chấp nhận được (key vẫn
+ * hiện ở cấp dưới dưới dạng leaf). */
+static bool is_list_entry(xmlNodePtr node) {
+    const char *name = (const char *)node->name;
+    for (xmlNodePtr s = node->next; s; s = s->next) {
+        if (s->type == XML_ELEMENT_NODE && strcmp((char *)s->name, name) == 0)
+            return true;
+    }
+    for (xmlNodePtr s = node->prev; s; s = s->prev) {
+        if (s->type == XML_ELEMENT_NODE && strcmp((char *)s->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
 static char *get_key_value(xmlNodePtr node) {
-    /* Duyệt con, lấy text content của element con đầu tiên */
+    if (!is_list_entry(node)) return NULL;
+    /* Element con đầu tiên phải là leaf thuần (không có cháu element). */
     for (xmlNodePtr c = node->children; c; c = c->next) {
-        if (c->type == XML_ELEMENT_NODE) {
-            xmlChar *content = xmlNodeGetContent(c);
-            if (content) {
-                char *val = xstrdup((char *)content);
-                xmlFree(content);
-                return val;
-            }
+        if (c->type != XML_ELEMENT_NODE) continue;
+        for (xmlNodePtr gc = c->children; gc; gc = gc->next) {
+            if (gc->type == XML_ELEMENT_NODE) return NULL;
         }
+        xmlChar *content = xmlNodeGetContent(c);
+        if (!content) return NULL;
+        char *val = xstrdup((char *)content);
+        xmlFree(content);
+        return val;
     }
     return NULL;
 }
@@ -312,35 +330,33 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
         return;
     }
 
-    /* Đến đây là hiển thị node thực sự (đã qua bộ lọc hoặc không có bộ lọc) */
-    char pad[128] = {0};
-    for (int i = 0; i < indent && i < 60; i++) pad[i] = ' ';
+    /* Đến đây là hiển thị node thực sự (đã qua bộ lọc hoặc không có bộ lọc).
+     * 1 cấp = 1 ký tự TAB; cùng level → cùng số tab. */
+    char pad[64] = {0};
+    int pad_lvl = indent + 1;  /* +1 vì dòng đầu (path) đã in sẵn, tất cả nội dung thụt 1 tab */
+    if (pad_lvl > 60) pad_lvl = 60;
+    for (int i = 0; i < pad_lvl; i++) pad[i] = '\t';
 
     if (!node_has_element_children(node)) {
-        /* Trường hợp leaf: hiển thị tên và giá trị trên cùng dòng */
+        /* Leaf: "\t*N <name> <value>" */
         xmlChar *content = xmlNodeGetContent(node);
         if (first_pass) {
-            /* Chế độ hiển thị đường dẫn đầy đủ (chưa triển khai) */
+            /* (chưa dùng) */
         } else {
-            /* Căn chỉnh cột: tên (24 ký tự) + giá trị */
-            sb_printf(sb, "%-*s%-24s %s\n",
-                      indent * 2, "",
-                      name,
+            sb_printf(sb, "%s%s %s\n",
+                      pad, name,
                       content ? (char *)content : "");
         }
         xmlFree(content);
     } else {
-        /* Trường hợp container hoặc list entry */
+        /* Container hoặc list entry */
         char *key_val = get_key_value(node);
         if (key_val) {
-            /* List entry: hiển thị "tên giá_trị_key" (ví dụ: "server 10.0.0.1") */
             sb_printf(sb, "%s%s %s\n", pad, name, key_val);
             free(key_val);
         } else {
-            /* Container thường: chỉ hiển thị tên */
             sb_printf(sb, "%s%s\n", pad, name);
         }
-        /* Đệ quy hiển thị các node con */
         for (xmlNodePtr c = node->children; c; c = c->next) {
             if (c->type == XML_ELEMENT_NODE)
                 render_node(sb, c, indent + 1, false,

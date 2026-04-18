@@ -28,11 +28,30 @@ Hỗ trợ 3 chế độ chạy:
 docker cp <confd-container>:/usr/lib64/libconfd.so ./libconfd-server.so
 docker cp <confd-container>:/usr/lib64/libcrypto.so.10 ./libcrypto-server.so
 
-# Build
+# Build binary
 make CONFD_LIB=./libconfd-server.so
 
 # Dọn
 make clean
+```
+
+### Build Docker image (2 tầng: base + app)
+
+Base image `hsdfat/cli-netconf:ubuntu` chứa sẵn apt deps (gcc, openssh, …)
+— build 1 lần, push lên Docker Hub. Dockerfile chính `FROM` base đó, không
+gọi `apt` nên build được trong môi trường private offline.
+
+```bash
+# Base (chỉ khi cần update deps)
+docker build -f Dockerfile.base -t hsdfat/cli-netconf:ubuntu .
+docker push  hsdfat/cli-netconf:ubuntu
+
+# App (offline OK — pull base từ registry)
+docker build -t hsdfat/cli-netconf:latest .
+docker push  hsdfat/cli-netconf:latest
+
+# Pull ảnh đã build sẵn
+docker pull hsdfat/cli-netconf:latest
 ```
 
 ---
@@ -62,7 +81,7 @@ User ──SSH──→ [sshd] ──PAM──→ POST /aa/authenticate → mgt-
                │
          MAAPI connect → conf_master_ip:conf_port_master_tcp
                │
-         maapi[smf-01]> _
+         anhdt195[smf-01]> _
 ```
 
 ### Build & chạy Docker
@@ -134,7 +153,7 @@ MGT_SVC_BASE=http://localhost:9233 LD_LIBRARY_PATH=. ./cli-netconf
 No CONFD_IPC_ADDR set. Use login to connect via mgt-svc.
 Type help for commands.
 
-maapi[confd]> login anhdt195
+anhdt195[confd]> login anhdt195
 Password: ****
 Logged in as anhdt195
 
@@ -151,7 +170,7 @@ Loading schema...
 Schema loaded.
 Connected to eir (172.19.0.2:23645)
 
-maapi[eir]> show running-config
+anhdt195[eir]> show running-config
 ...
 ```
 
@@ -244,6 +263,54 @@ unset /eir/networkConfig
 
 ---
 
+## Prompt format
+
+```
+<user>[<ne>]>
+```
+
+`<user>` lấy từ env `MAAPI_USER` (wrapper SSH set = username đăng nhập),
+fallback `USER` → `LOGNAME` → `admin`. `<ne>` là tên NE đang kết nối
+(hoặc `confd` khi chưa chọn NE).
+
+Ví dụ: `anhdt195[smf-01]>`
+
+---
+
+## Config output format
+
+`show running-config [path...]` in ra cây config với 2 quy ước:
+
+1. **Dòng đầu = path** — datastore + các phần tử path cách nhau bởi space.
+2. **Các dòng sau = cây config** — mỗi cấp thụt vào 1 ký tự `\t`. Các leaf
+   cùng 1 container luôn có số tab bằng nhau.
+
+```
+anhdt195[eir]> show running-config eir nsmfPduSession
+running-config eir nsmfPduSession
+	is-enabled true
+	max-sessions 100
+	timeout
+		idle 300
+		hard 3600
+(12ms)
+```
+
+List entry (có sibling cùng tên) in kèm key ngay cạnh tên:
+
+```
+anhdt195[eir]> show running-config servers
+running-config servers
+	server ntp1
+		name ntp1
+		address 10.0.0.1
+	server ntp2
+		name ntp2
+		address 10.0.0.2
+```
+
+---
+
 ## Tab completion
 
 - `show <TAB>` → `running-config`, `candidate-config`
@@ -259,7 +326,7 @@ Schema tự động load từ ConfD `cs_node` tree — không cần YANG files.
 ## Paste XML
 
 ```
-maapi[eir]> set
+anhdt195[eir]> set
 Paste XML config (empty line to finish):
 <eir xmlns="http://yang.vht.vn/v5gc/eir/2.0">
   <nsmfPduSession>
@@ -268,7 +335,7 @@ Paste XML config (empty line to finish):
 </eir>
 
 OK (staged in candidate)
-maapi[eir]> commit
+anhdt195[eir]> commit
 Commit successful.
 ```
 
