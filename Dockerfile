@@ -241,7 +241,7 @@ SSH_PORT="${SSH_PORT:-22}"
 cat > /etc/cli-netconf/env <<EOF
 MGT_SVC_BASE=${MGT_SVC_BASE:-http://mgt-service:3000}
 LOG_LEVEL=${LOG_LEVEL:-info}
-LOG_STDERR=${LOG_STDERR:-1}
+LOG_STDERR=${LOG_STDERR:-0}
 LOG_PID1=${LOG_PID1:-1}
 EOF
 chmod 644 /etc/cli-netconf/env
@@ -283,7 +283,7 @@ EXPOSE 22
 
 ENV MGT_SVC_BASE=http://mgt-service:3000 \
     LOG_LEVEL=info \
-    LOG_STDERR=1 \
+    LOG_STDERR=0 \
     LOG_PID1=1 \
     SSH_PORT=22 \
     SEED_USERNAME=anhdt195 \

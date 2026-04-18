@@ -26,7 +26,8 @@ SRCS := $(SRCDIR)/main.c       \
         $(SRCDIR)/maapi-ops.c  \
         $(SRCDIR)/maapi.c      \
         $(SRCDIR)/schema.c     \
-        $(SRCDIR)/formatter.c
+        $(SRCDIR)/formatter.c  \
+        $(SRCDIR)/log.c
 
 # ----- CONFD_LIB: đường dẫn đến libconfd.so -----
 ifeq ($(MAKECMDGOALS),clean)

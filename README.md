@@ -122,7 +122,7 @@ Set qua `docker run -e ...` / docker-compose. Entrypoint ghi vào
 | `MGT_SVC_BASE` | `http://mgt-service:3000` | URL gốc mgt-svc (authenticate + list NE) |
 | `SSH_PORT` | `22` | Port sshd lắng nghe bên trong container |
 | `LOG_LEVEL` | `info` | Level log: `debug` / `info` / `warn` / `error` / `off` |
-| `LOG_STDERR` | `1` | `1` = log hiện trên terminal user khi SSH vào, `0` = chỉ ghi file |
+| `LOG_STDERR` | `0` | `1` = log hiện trên terminal user khi SSH vào, `0` = chỉ ghi file + `docker logs` (mặc định giữ terminal user sạch) |
 | `SEED_USERNAME` | `anhdt195` | User để sync danh sách user từ mgt-svc |
 | `SEED_PASSWORD` | `123` | Password của seed user |
 
@@ -204,7 +204,7 @@ LD_LIBRARY_PATH=. \
 | `NE_IP` | — | IP NE (override, mặc định lấy từ MAAPI host) |
 | `LOG_LEVEL` | `info` | Level log |
 | `LOG_FILE` | `/tmp/cli-netconf.log` | Đường dẫn file log |
-| `LOG_STDERR` | auto | `1` = log ra stderr, auto-on nếu stderr là TTY |
+| `LOG_STDERR` | `0` | `1` = log ra stderr (terminal user), `0` = chỉ ghi file |
 
 ---
 
@@ -278,6 +278,9 @@ Cú pháp: `set <container...> <list-name> <key-value> [<leaf> <value> ...]`
   vì ConfD tự lưu key từ `{john}` trong path.
 - **Batch**: sau key value, có thể truyền nhiều cặp `<leaf> <value>` để set
   luôn tất cả trong một lệnh.
+- **Auto-create list entry**: nếu list entry với key đó chưa tồn tại, CLI tự
+  tạo entry trước khi set các leaf con — không cần lệnh khởi tạo riêng. Đã
+  tồn tại thì vẫn OK (idempotent).
 
 ```
 # Đặt 1 leaf
@@ -426,7 +429,7 @@ Commit successful.
 |---|---|---|
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` / `off` |
 | `LOG_FILE` | per-user trong SSH mode | Path file log (tự tính `/var/log/cli-netconf/<user>.log` nếu có `$USER`) |
-| `LOG_STDERR` | `1` (hoặc auto nếu stderr là TTY) | Song song ghi log ra terminal user |
+| `LOG_STDERR` | `0` | Song song ghi log ra terminal user. Mặc định tắt để khi `set`/`commit` fail, user chỉ thấy 1 dòng lỗi ngắn thay vì `[WARN] file:line …` noise. Log chi tiết vẫn vào `/var/log/cli-netconf/<user>.log` + `docker logs` (qua `LOG_PID1`). |
 | `LOG_PID1` | `1` trong Docker image | Ghi log vào `/proc/1/fd/2` (stderr của sshd PID 1) để xuất hiện trong `docker logs` |
 
 ### Các nguồn log trong SSH Server Mode

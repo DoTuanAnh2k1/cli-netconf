@@ -305,6 +305,13 @@ int maapi_set_elem2(int sock, int thandle, const char *strval,
 int maapi_delete(int sock, int thandle, const char *fmt, ...);
 
 /*
+ * Create a list entry or presence container at the given keypath.
+ * Idempotent-ish: trả CONFD_OK nếu entry đã tồn tại hoặc vừa được tạo mới.
+ * Dùng trước khi set leaves cho list entry để đảm bảo entry tồn tại.
+ */
+int maapi_create(int sock, int thandle, const char *fmt, ...);
+
+/*
  * ConfD's own maapi_close — closes the MAAPI socket.
  * NOTE: do NOT name your own function "maapi_close" to avoid conflicts.
  */

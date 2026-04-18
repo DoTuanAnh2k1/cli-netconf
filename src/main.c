@@ -862,6 +862,17 @@ static void cmd_set(char **args, int argc) {
                     return;
                 }
 
+                /* Đảm bảo list entry tồn tại trước khi set leaves — nếu
+                 * entry chưa có, maapi_set_elem2 trên leaf của nó có thể
+                 * fail với "path not exists". maapi_create_list_entry
+                 * idempotent (đã tồn tại cũng OK). */
+                if (maapi_create_list_entry(g_maapi, kp) != 0) {
+                    fprintf(stderr, "%screate list entry %s failed%s\n",
+                            COLOR_RED, kp, COLOR_RESET);
+                    free(kp);
+                    return;
+                }
+
                 int ok = 0, fail = 0;
                 for (int j = i; j + 1 < argc; j += 2) {
                     const char *lname = args[j];

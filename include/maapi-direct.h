@@ -66,6 +66,13 @@ int maapi_load_xml(maapi_session_t *m, const char *xml);
  */
 int maapi_delete_node(maapi_session_t *m, const char *keypath);
 
+/*
+ * Tạo list entry / presence container tại keypath (idempotent — đã tồn
+ * tại vẫn trả 0). Dùng trước khi set leaves cho list entry để đảm bảo
+ * entry tồn tại.
+ */
+int maapi_create_list_entry(maapi_session_t *m, const char *keypath);
+
 /* ─── Transaction control ───────────────────────────────── */
 
 /* Validate candidate. Trả về 0 OK, -1 lỗi. */

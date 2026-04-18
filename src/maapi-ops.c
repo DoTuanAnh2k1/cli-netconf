@@ -30,6 +30,7 @@
 #include "confd_compat.h"
 #include "cli.h"
 #include "maapi-direct.h"
+#include "log.h"
 
 /* ─── Hàm trợ giúp nội bộ (internal helpers) ──────────────── */
 
@@ -116,8 +117,7 @@ static int ensure_write_trans(maapi_session_t *m) {
     /* Mở write transaction mới trên candidate datastore */
     int th = maapi_start_trans(m->sock, CONFD_CANDIDATE, CONFD_READ_WRITE);
     if (th < 0) {
-        fprintf(stderr, "[maapi] start_trans(write) failed: %s\n",
-                confd_lasterr());
+        LOG_WARN("maapi: start_trans(write) failed: %s", confd_lasterr());
         return -1;
     }
     m->th_write  = th;
@@ -170,7 +170,7 @@ maapi_session_t *maapi_dial(const char *host, int port, const char *user) {
     addr.sin_family = AF_INET;
     addr.sin_port   = htons((uint16_t)port);
     if (inet_aton(host, &addr.sin_addr) == 0) {
-        fprintf(stderr, "[maapi] invalid address: %s\n", host);
+        LOG_WARN("maapi: invalid address: %s", host);
         return NULL;
     }
 
@@ -180,8 +180,8 @@ maapi_session_t *maapi_dial(const char *host, int port, const char *user) {
 
     /* Kết nối tới ConfD qua giao thức MAAPI IPC */
     if (maapi_connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != CONFD_OK) {
-        fprintf(stderr, "[maapi] connect to %s:%d failed: %s\n",
-                host, port, confd_lasterr());
+        LOG_WARN("maapi: connect to %s:%d failed: %s",
+                 host, port, confd_lasterr());
         close(sock);
         return NULL;
     }
@@ -192,8 +192,7 @@ maapi_session_t *maapi_dial(const char *host, int port, const char *user) {
                                  "system",     /* context: dùng cho audit log */
                                  NULL, 0,      /* groups: NULL, count: 0 */
                                  CONFD_PROTO_TCP) != CONFD_OK) {
-        fprintf(stderr, "[maapi] start_user_session failed: %s\n",
-                confd_lasterr());
+        LOG_WARN("maapi: start_user_session failed: %s", confd_lasterr());
         maapi_close(sock);
         return NULL;
     }
@@ -263,8 +262,7 @@ char *maapi_get_config_xml(maapi_session_t *m, int db) {
     /* Mở read-only transaction trên datastore */
     int th = maapi_start_trans(m->sock, db, CONFD_READ);
     if (th < 0) {
-        fprintf(stderr, "[maapi] start_trans(read) failed: %s\n",
-                confd_lasterr());
+        LOG_WARN("maapi: start_trans(read) failed: %s", confd_lasterr());
         return NULL;
     }
 
@@ -279,7 +277,7 @@ char *maapi_get_config_xml(maapi_session_t *m, int db) {
                                 | MAAPI_CONFIG_SHOW_DEFAULTS,  /* Hiển thị giá trị mặc định */
                                 NULL);  /* NULL = không lọc theo path, lấy toàn bộ */
     if (sid < 0) {
-        fprintf(stderr, "[maapi] save_config failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: save_config failed: %s", confd_lasterr());
         maapi_finish_trans(m->sock, th);
         return NULL;
     }
@@ -300,7 +298,7 @@ char *maapi_get_config_xml(maapi_session_t *m, int db) {
     /* Kết nối stream socket với stream-id vừa nhận */
     if (confd_stream_connect(ssock, (struct sockaddr *)&addr,
                              sizeof(addr), sid, 0) != CONFD_OK) {
-        fprintf(stderr, "[maapi] stream_connect failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: stream_connect failed: %s", confd_lasterr());
         close(ssock);
         maapi_finish_trans(m->sock, th);
         return NULL;
@@ -364,11 +362,35 @@ int maapi_set_value_str(maapi_session_t *m,
 
     /* maapi_set_elem2 nhận chuỗi thuần — không cần tạo confd_value_t */
     if (maapi_set_elem2(m->sock, m->th_write, value, "%s", keypath) != CONFD_OK) {
-        fprintf(stderr, "[maapi] set_elem2 %s = %s failed: %s\n",
-                keypath, value, confd_lasterr());
+        LOG_WARN("maapi: set_elem2 %s = %s failed: %s",
+                 keypath, value, confd_lasterr());
         return -1;
     }
     return 0;
+}
+
+/*
+ * maapi_create_list_entry — Đảm bảo list entry tại keypath tồn tại.
+ *
+ * ConfD: maapi_create tạo list entry hoặc presence container. Nếu entry đã
+ * tồn tại, một số phiên bản trả CONFD_ERR với code "already exists" — ta coi
+ * đó là thành công (idempotent). Gọi trước khi set leaves của list entry để
+ * phòng trường hợp entry chưa có sẵn.
+ *
+ * Trả 0 nếu entry đã/đang tồn tại, -1 nếu lỗi thực sự.
+ */
+int maapi_create_list_entry(maapi_session_t *m, const char *keypath) {
+    if (ensure_write_trans(m) != 0) return -1;
+    int rc = maapi_create(m->sock, m->th_write, "%s", keypath);
+    if (rc == CONFD_OK) return 0;
+
+    /* "already exists" → OK, coi như idempotent */
+    const char *err = confd_lasterr();
+    if (err && (strstr(err, "exists") || strstr(err, "already"))) {
+        return 0;
+    }
+    LOG_WARN("maapi: create %s failed: %s", keypath, err ? err : "?");
+    return -1;
 }
 
 /*
@@ -403,7 +425,7 @@ int maapi_load_xml(maapi_session_t *m, const char *xml) {
     free(tmppath);
 
     if (rc != CONFD_OK) {
-        fprintf(stderr, "[maapi] load_config failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: load_config failed: %s", confd_lasterr());
         return -1;
     }
     return 0;
@@ -426,8 +448,7 @@ int maapi_delete_node(maapi_session_t *m, const char *keypath) {
     if (ensure_write_trans(m) != 0) return -1;
 
     if (maapi_delete(m->sock, m->th_write, "%s", keypath) != CONFD_OK) {
-        fprintf(stderr, "[maapi] delete %s failed: %s\n",
-                keypath, confd_lasterr());
+        LOG_WARN("maapi: delete %s failed: %s", keypath, confd_lasterr());
         return -1;
     }
     return 0;
@@ -458,7 +479,7 @@ int maapi_do_validate(maapi_session_t *m) {
                              1 /* unlock */,
                              1 /* forcevalidation */)
         != CONFD_OK) {
-        fprintf(stderr, "[maapi] validate failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: validate failed: %s", confd_lasterr());
         return -1;
     }
     return 0;
@@ -483,7 +504,7 @@ int maapi_do_commit(maapi_session_t *m) {
     /* Bước 1: Áp dụng write transaction vào candidate datastore */
     if (m->has_write) {
         if (maapi_apply_trans(m->sock, m->th_write, 0) != CONFD_OK) {
-            fprintf(stderr, "[maapi] apply_trans failed: %s\n", confd_lasterr());
+            LOG_WARN("maapi: apply_trans failed: %s", confd_lasterr());
             return -1;
         }
         /* Đóng write transaction sau khi đã áp dụng thành công */
@@ -493,7 +514,7 @@ int maapi_do_commit(maapi_session_t *m) {
 
     /* Bước 2: Commit candidate → running (cập nhật cấu hình đang chạy) */
     if (maapi_candidate_commit(m->sock) != CONFD_OK) {
-        fprintf(stderr, "[maapi] candidate_commit failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: candidate_commit failed: %s", confd_lasterr());
         return -1;
     }
     return 0;
@@ -518,7 +539,7 @@ int maapi_do_discard(maapi_session_t *m) {
 
     /* Reset candidate datastore về trạng thái giống running */
     if (maapi_candidate_reset(m->sock) != CONFD_OK) {
-        fprintf(stderr, "[maapi] candidate_reset failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: candidate_reset failed: %s", confd_lasterr());
         return -1;
     }
     return 0;
@@ -536,7 +557,7 @@ int maapi_do_discard(maapi_session_t *m) {
  */
 int maapi_do_lock(maapi_session_t *m, int db) {
     if (maapi_lock(m->sock, db) != CONFD_OK) {
-        fprintf(stderr, "[maapi] lock failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: lock failed: %s", confd_lasterr());
         return -1;
     }
     return 0;
@@ -554,7 +575,7 @@ int maapi_do_lock(maapi_session_t *m, int db) {
  */
 int maapi_do_unlock(maapi_session_t *m, int db) {
     if (maapi_unlock(m->sock, db) != CONFD_OK) {
-        fprintf(stderr, "[maapi] unlock failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: unlock failed: %s", confd_lasterr());
         return -1;
     }
     return 0;
@@ -576,7 +597,7 @@ int maapi_do_list_rollbacks(maapi_session_t *m,
     int cap = max < 64 ? max : 64;
     int n   = cap;  /* IN: capacity, OUT: actual count */
     if (maapi_list_rollbacks(m->sock, raw, &n) != CONFD_OK) {
-        fprintf(stderr, "[maapi] list_rollbacks failed: %s\n", confd_lasterr());
+        LOG_WARN("maapi: list_rollbacks failed: %s", confd_lasterr());
         return -1;
     }
     if (n > cap) n = cap;
@@ -605,8 +626,8 @@ int maapi_do_load_rollback(maapi_session_t *m, int rollback_num) {
     if (ensure_write_trans(m) != 0) return -1;
 
     if (maapi_load_rollback(m->sock, m->th_write, rollback_num) != CONFD_OK) {
-        fprintf(stderr, "[maapi] load_rollback %d failed: %s\n",
-                rollback_num, confd_lasterr());
+        LOG_WARN("maapi: load_rollback %d failed: %s",
+                 rollback_num, confd_lasterr());
         return -1;
     }
     return 0;
