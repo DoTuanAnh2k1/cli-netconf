@@ -74,9 +74,9 @@ User ──SSH──→ [sshd] ──PAM──→ POST /aa/authenticate → mgt-
                ▼
          GET /aa/list/ne → danh sách NE
                │
-         #   Site    NE        ConfD IP     Port
-         1   HN01    smf-01    172.19.0.2   23645
-         2   HN02    smf-02    172.19.0.3   23645
+         #   NE        ConfD IP     Port
+         1   smf-01    172.19.0.2   23645
+         2   smf-02    172.19.0.3   23645
          Select NE: 1
                │
          MAAPI connect → conf_master_ip:conf_port_master_tcp
@@ -159,9 +159,9 @@ Logged in as anhdt195
 
 Fetching NE list...
 
-#     Site    NE     Namespace   ConfD IP       Port    Description
-────  ──────  ─────  ──────────  ─────────────  ──────  ──────────────────
-1     HCM     eir    hteir01     172.19.0.2     23645   EIR - Equipment Identity Register
+#     NE     Namespace   ConfD IP       Port    Description
+────  ─────  ──────────  ─────────────  ──────  ──────────────────
+1     eir    hteir01     172.19.0.2     23645   EIR - Equipment Identity Register
 
 Select NE (# or namespace): 1
 
