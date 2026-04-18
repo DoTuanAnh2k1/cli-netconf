@@ -46,6 +46,10 @@ enum {
 static FILE *g_log_fp     = NULL;
 static int   g_log_level  = LOG_LVL_INFO;  /* Mặc định: INFO */
 static int   g_log_stderr = 0;             /* 1 = song song ghi ra stderr (terminal) */
+static FILE *g_log_pid1   = NULL;          /* /proc/1/fd/2 — đổ log vào stderr
+                                              của PID 1 (sshd) để xuất hiện
+                                              trong `docker logs`. Bật bằng
+                                              LOG_PID1=1. */
 
 /* ── Tên level cho output ───────────────────────────────── */
 static inline const char *log_level_str(int level) {
@@ -141,6 +145,14 @@ static inline void log_init(void) {
     } else {
         g_log_stderr = isatty(fileno(stderr)) ? 1 : 0;
     }
+
+    /* LOG_PID1=1 → mở thêm /proc/1/fd/2 để log hiện trong `docker logs`.
+     * Bên Dockerfile set env này cho cli-netconf chạy dưới sshd. */
+    const char *pid1_env = getenv("LOG_PID1");
+    if (pid1_env && pid1_env[0] != '0') {
+        g_log_pid1 = fopen("/proc/1/fd/2", "w");
+        if (g_log_pid1) setvbuf(g_log_pid1, NULL, _IOLBF, 0);
+    }
 }
 
 /*
@@ -151,6 +163,10 @@ static inline void log_close(void) {
         fclose(g_log_fp);
         g_log_fp = NULL;
     }
+    if (g_log_pid1) {
+        fclose(g_log_pid1);
+        g_log_pid1 = NULL;
+    }
 }
 
 /*
@@ -160,7 +176,7 @@ static inline void log_close(void) {
  */
 static inline void log_write(int level, const char *file, int line,
                               const char *fmt, ...) {
-    if (!g_log_fp && !g_log_stderr) return;
+    if (!g_log_fp && !g_log_stderr && !g_log_pid1) return;
 
     /* Timestamp */
     time_t now = time(NULL);
@@ -193,6 +209,12 @@ static inline void log_write(int level, const char *file, int line,
         else
             fprintf(stderr, "[%s] %s\n", log_level_str(level), msg);
         fflush(stderr);
+    }
+    if (g_log_pid1) {
+        /* Format dành cho docker logs — có timestamp và user/session prefix
+         * qua msg, không cần file:line nhiễu mắt. */
+        fprintf(g_log_pid1, "%s [cli] [%s] %s\n",
+                ts, log_level_str(level), msg);
     }
 }
 

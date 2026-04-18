@@ -390,6 +390,7 @@ Commit successful.
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` / `off` |
 | `LOG_FILE` | per-user trong SSH mode | Path file log (tự tính `/var/log/cli-netconf/<user>.log` nếu có `$USER`) |
 | `LOG_STDERR` | `1` (hoặc auto nếu stderr là TTY) | Song song ghi log ra terminal user |
+| `LOG_PID1` | `1` trong Docker image | Ghi log vào `/proc/1/fd/2` (stderr của sshd PID 1) để xuất hiện trong `docker logs` |
 
 ### Các nguồn log trong SSH Server Mode
 
@@ -398,18 +399,54 @@ Commit successful.
 | `/var/log/cli-netconf/auth.log` | `auth-mgt.sh` (PAM) | Mỗi lần SSH login thử: user, HTTP code, curl error, reason fail |
 | `/var/log/cli-netconf/session.log` | wrapper | Start/end session: user, rhost, token có/không |
 | `/var/log/cli-netconf/<user>.log` | `cli-netconf` | Lệnh user gõ, kết nối NE, commit, error |
-| `docker logs <container>` | entrypoint tail | Tổng hợp sshd + auth.log + session.log real-time |
+| `docker logs <container>` | auth-mgt.sh + cli-netconf (`LOG_PID1=1`) | Auth fail reason + mọi dòng log INFO/WARN/ERROR của CLI real-time |
 
 Khi `LOG_STDERR=1`, log binary cũng hiện luôn trên terminal user vừa SSH vào —
 thấy được ngay `[INFO]` / `[WARN]` / `[ERROR]` mà không phải `docker exec tail`.
 
+Khi `LOG_PID1=1` (bật mặc định trong ảnh Docker), mọi log của binary đều được
+copy sang stderr của PID 1 (sshd), nên `docker logs <container>` sẽ thấy đầy
+đủ chuỗi thao tác của từng user real-time — không phải `docker exec` vào tail.
+
+### Các log được ghi ở mức INFO
+
+Ngoài những sự kiện về session (login, logout, connect NE), từ tag `18046`
+cli-netconf log ở mức INFO cho từng thao tác của user để admin có thể tra cứu
+"ai gõ lệnh gì vào NE nào lúc nào":
+
+| Sự kiện | Mẫu log |
+|---|---|
+| Session bắt đầu | `session start: user=phatlc rhost=10.0.0.5` |
+| Fetch NE list | `fetching NE list for user=phatlc` |
+| Chọn NE | `NE selected: user=phatlc rhost=10.0.0.5 NE=smf-01 (172.19.0.2:23645)` |
+| Kết nối MAAPI | `connected to NE=smf-01 ns=v5gc (...) user=phatlc` |
+| Mỗi lệnh user gõ | `cmd: user=phatlc rhost=10.0.0.5 ne=smf-01 >> show running-config eir` |
+| `show` kết quả | `show OK: user=phatlc ne=smf-01 ds=running-config (42ms)` |
+| `set` / `unset` | `set OK: user=phatlc ne=smf-01 path=/system/hostname value=new-host` |
+| `commit` | `commit OK: user=phatlc ne=smf-01 (18ms)` / `commit FAILED: ...` |
+| `validate` / `discard` / `lock` / `unlock` | `<cmd> OK: user=phatlc ne=smf-01 ...` |
+| `save` → mgt-svc | `save OK: user=phatlc ne=smf-01 scope=ne-config result=success` |
+| `exit` về NE select | `exit from NE=smf-01 → back to NE select` |
+
 ### Format file log
 
 ```
-2026-04-16 02:30:48 [INFO ] main.c:1933  cli-netconf started, mode=ssh-server
-2026-04-16 02:30:48 [INFO ] main.c:2045  login success: user=admin
-2026-04-16 02:30:49 [INFO ] main.c:1602  connected to NE=smf-01 ns=v5gc (172.19.0.2:23645)
-2026-04-16 02:31:05 [DEBUG] main.c:1883  cmd: user=admin ne=smf-01 >> show running-config eir
+2026-04-18 02:30:48 [INFO ] main.c:2075  cli-netconf started, mode=ssh-server
+2026-04-18 02:30:48 [INFO ] main.c:2017  session start: user=phatlc rhost=10.0.0.5
+2026-04-18 02:30:49 [INFO ] main.c:1636  fetching NE list for user=phatlc
+2026-04-18 02:30:50 [INFO ] main.c:1687  NE selected: user=phatlc rhost=10.0.0.5 NE=smf-01 (172.19.0.2:23645)
+2026-04-18 02:30:51 [INFO ] main.c:1710  connected to NE=smf-01 ns=v5gc (172.19.0.2:23645) user=phatlc
+2026-04-18 02:31:05 [INFO ] main.c:1961  cmd: user=phatlc rhost=10.0.0.5 ne=smf-01 >> show running-config eir
+2026-04-18 02:31:05 [INFO ] main.c:542   show OK: user=phatlc ne=smf-01 ds=running-config (27ms)
+2026-04-18 02:31:22 [INFO ] main.c:700   set OK: user=phatlc ne=smf-01 path=/system/hostname value=edge-01
+2026-04-18 02:31:25 [INFO ] main.c:763   commit OK: user=phatlc ne=smf-01 (15ms)
+```
+
+Trong `docker logs`, format gọn hơn (bỏ file:line):
+
+```
+2026-04-18 02:31:05 [cli] [INFO ] cmd: user=phatlc rhost=10.0.0.5 ne=smf-01 >> show running-config eir
+2026-04-18 02:31:05 [cli] [INFO ] show OK: user=phatlc ne=smf-01 ds=running-config (27ms)
 ```
 
 Khi `LOG_LEVEL=off`: không mở file, zero overhead.

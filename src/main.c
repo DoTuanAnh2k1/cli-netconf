@@ -93,6 +93,28 @@ static char             g_mgt_user[128] = "";
 /* Username dùng trong prompt CLI — lấy từ MAAPI_USER/USER env tại startup. */
 static char             g_cli_user[128] = "admin";
 
+/* Địa chỉ client gửi SSH (parse từ env SSH_CLIENT = "ip port port"), rỗng nếu
+ * không có (direct mode hoặc chạy local). Dùng để chèn vào log command tracing
+ * nên admin biết ai/ở đâu gõ lệnh gì. */
+static char             g_rhost[64] = "";
+
+/**
+ * init_rhost - Khởi tạo g_rhost từ biến môi trường SSH_CLIENT.
+ *
+ * SSH_CLIENT có định dạng "<remote_ip> <remote_port> <local_port>".
+ * Lấy phần đầu (IP) lưu vào g_rhost. Nếu không có biến này (chạy local/direct)
+ * thì g_rhost vẫn rỗng.
+ */
+static void init_rhost(void) {
+    const char *sc = getenv("SSH_CLIENT");
+    if (!sc || !*sc) { g_rhost[0] = '\0'; return; }
+    const char *sp = strchr(sc, ' ');
+    size_t len = sp ? (size_t)(sp - sc) : strlen(sc);
+    if (len >= sizeof(g_rhost)) len = sizeof(g_rhost) - 1;
+    memcpy(g_rhost, sc, len);
+    g_rhost[len] = '\0';
+}
+
 /* ─── Hàm tiện ích (Helpers) ─────────────────────────────────── */
 
 /**
@@ -536,10 +558,14 @@ static void cmd_show(char **args, int argc) {
     char *xml = maapi_get_config_xml(g_maapi, db);
     long ms = elapsed_ms(&t0);
 
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
     if (!xml) {
+        LOG_WARN("show FAILED: user=%s ne=%s ds=%s", who, g_ne_name, args[0]);
         fprintf(stderr, "%sget-config failed%s\n", COLOR_RED, COLOR_RESET);
         return;
     }
+    LOG_INFO("show OK: user=%s ne=%s ds=%s (%ldms)",
+             who, g_ne_name, args[0], ms);
 
     /* Lọc XML theo đường dẫn nếu người dùng chỉ định (ví dụ: show running-config system ntp) */
     const char **path = (const char **)(args + 1);
@@ -687,10 +713,16 @@ static void cmd_set(char **args, int argc) {
     }
 
     /* Gọi MAAPI để đặt giá trị vào candidate datastore */
-    if (maapi_set_value_str(g_maapi, keypath, value) == 0)
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
+    if (maapi_set_value_str(g_maapi, keypath, value) == 0) {
+        LOG_INFO("set OK: user=%s ne=%s path=%s value=%s",
+                 who, g_ne_name, keypath, value);
         printf("%sOK%s\n", COLOR_GREEN, COLOR_RESET);
-    else
+    } else {
+        LOG_WARN("set FAILED: user=%s ne=%s path=%s value=%s",
+                 who, g_ne_name, keypath, value);
         fprintf(stderr, "%sset failed%s\n", COLOR_RED, COLOR_RESET);
+    }
     free(keypath);
 }
 
@@ -730,10 +762,15 @@ static void cmd_unset(char **args, int argc) {
     }
 
     /* Gọi MAAPI để xoá node khỏi candidate datastore */
-    if (maapi_delete_node(g_maapi, keypath) == 0)
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
+    if (maapi_delete_node(g_maapi, keypath) == 0) {
+        LOG_INFO("unset OK: user=%s ne=%s path=%s", who, g_ne_name, keypath);
         printf("%sOK%s\n", COLOR_GREEN, COLOR_RESET);
-    else
+    } else {
+        LOG_WARN("unset FAILED: user=%s ne=%s path=%s",
+                 who, g_ne_name, keypath);
         fprintf(stderr, "%sunset failed%s\n", COLOR_RED, COLOR_RESET);
+    }
     free(keypath);
 }
 
@@ -746,9 +783,14 @@ static void cmd_commit(void) {
     REQUIRE_MAAPI();
     struct timeval t0; gettimeofday(&t0, NULL);
     if (maapi_do_commit(g_maapi) == 0) {
+        long ms = elapsed_ms(&t0);
+        LOG_INFO("commit OK: user=%s ne=%s (%ldms)",
+                 (*g_mgt_user) ? g_mgt_user : g_cli_user, g_ne_name, ms);
         printf("%sCommit successful.%s\n", COLOR_GREEN, COLOR_RESET);
-        print_done(elapsed_ms(&t0));
+        print_done(ms);
     } else {
+        LOG_WARN("commit FAILED: user=%s ne=%s",
+                 (*g_mgt_user) ? g_mgt_user : g_cli_user, g_ne_name);
         fprintf(stderr, "%sCommit failed.%s\n", COLOR_RED, COLOR_RESET);
     }
 }
@@ -761,10 +803,14 @@ static void cmd_commit(void) {
  */
 static void cmd_validate(void) {
     REQUIRE_MAAPI();
-    if (maapi_do_validate(g_maapi) == 0)
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
+    if (maapi_do_validate(g_maapi) == 0) {
+        LOG_INFO("validate OK: user=%s ne=%s", who, g_ne_name);
         printf("%sValidation OK.%s\n", COLOR_GREEN, COLOR_RESET);
-    else
+    } else {
+        LOG_WARN("validate FAILED: user=%s ne=%s", who, g_ne_name);
         fprintf(stderr, "%sValidation failed.%s\n", COLOR_RED, COLOR_RESET);
+    }
 }
 
 /**
@@ -774,10 +820,14 @@ static void cmd_validate(void) {
  */
 static void cmd_discard(void) {
     REQUIRE_MAAPI();
-    if (maapi_do_discard(g_maapi) == 0)
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
+    if (maapi_do_discard(g_maapi) == 0) {
+        LOG_INFO("discard OK: user=%s ne=%s", who, g_ne_name);
         printf("%sDiscarded.%s\n", COLOR_GREEN, COLOR_RESET);
-    else
+    } else {
+        LOG_WARN("discard FAILED: user=%s ne=%s", who, g_ne_name);
         fprintf(stderr, "%sDiscard failed.%s\n", COLOR_RED, COLOR_RESET);
+    }
 }
 
 /**
@@ -792,10 +842,15 @@ static void cmd_lock(char **args, int argc) {
     REQUIRE_MAAPI();
     int db = CONFD_CANDIDATE;  /* Mặc định khoá candidate */
     if (argc > 0 && strcasecmp(args[0], "running") == 0) db = CONFD_RUNNING;
-    if (maapi_do_lock(g_maapi, db) == 0)
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
+    const char *ds  = (db == CONFD_RUNNING) ? "running" : "candidate";
+    if (maapi_do_lock(g_maapi, db) == 0) {
+        LOG_INFO("lock OK: user=%s ne=%s ds=%s", who, g_ne_name, ds);
         printf("%sLocked.%s\n", COLOR_GREEN, COLOR_RESET);
-    else
+    } else {
+        LOG_WARN("lock FAILED: user=%s ne=%s ds=%s", who, g_ne_name, ds);
         fprintf(stderr, "%sLock failed.%s\n", COLOR_RED, COLOR_RESET);
+    }
 }
 
 /**
@@ -810,10 +865,15 @@ static void cmd_unlock(char **args, int argc) {
     REQUIRE_MAAPI();
     int db = CONFD_CANDIDATE;  /* Mặc định mở khoá candidate */
     if (argc > 0 && strcasecmp(args[0], "running") == 0) db = CONFD_RUNNING;
-    if (maapi_do_unlock(g_maapi, db) == 0)
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
+    const char *ds  = (db == CONFD_RUNNING) ? "running" : "candidate";
+    if (maapi_do_unlock(g_maapi, db) == 0) {
+        LOG_INFO("unlock OK: user=%s ne=%s ds=%s", who, g_ne_name, ds);
         printf("%sUnlocked.%s\n", COLOR_GREEN, COLOR_RESET);
-    else
+    } else {
+        LOG_WARN("unlock FAILED: user=%s ne=%s ds=%s", who, g_ne_name, ds);
         fprintf(stderr, "%sUnlock failed.%s\n", COLOR_RED, COLOR_RESET);
+    }
 }
 
 /**
@@ -1573,7 +1633,7 @@ static void cmd_login(char **args, int argc) {
  * Trả về 0 nếu connect thành công, -1 nếu user huỷ hoặc lỗi không phục hồi.
  */
 static int select_and_connect_ne(void) {
-    LOG_DEBUG("fetching NE list for user=%s", g_mgt_user);
+    LOG_INFO("fetching NE list for user=%s", g_mgt_user);
     printf("\nFetching NE list...\n");
     ne_item_t nes[NE_LIST_MAX];
     int ne_count = fetch_ne_list(g_mgt_token, nes);
@@ -1623,7 +1683,12 @@ static int select_and_connect_ne(void) {
 
         /* Kết nối MAAPI mới tới NE đã chọn */
         const char *maapi_user = env_or("MAAPI_USER", "admin");
-        LOG_INFO("connecting to NE=%s (%s:%d) user=%s", chosen->ne, conn_ip, conn_port, g_mgt_user);
+        if (*g_rhost)
+            LOG_INFO("NE selected: user=%s rhost=%s NE=%s (%s:%d)",
+                     g_mgt_user, g_rhost, chosen->ne, conn_ip, conn_port);
+        else
+            LOG_INFO("NE selected: user=%s NE=%s (%s:%d)",
+                     g_mgt_user, chosen->ne, conn_ip, conn_port);
         g_maapi = maapi_dial(conn_ip, conn_port, maapi_user);
         if (!g_maapi) {
             LOG_ERROR("MAAPI connect failed: NE=%s %s:%d", chosen->ne, conn_ip, conn_port);
@@ -1787,14 +1852,21 @@ static void cmd_save(char **args, int argc) {
                                 auth_hdr[0] ? auth_hdr : NULL, &resp);
     free(body);
 
+    const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
     if (status < 0) {
+        LOG_WARN("save FAILED (mgt-svc unreachable): user=%s ne=%s scope=%s",
+                 who, ne, scope);
         fprintf(stderr, "%smgt-svc POST failed%s (url=%s)\n",
                 COLOR_RED, COLOR_RESET, url);
     } else if (status == 201) {
+        LOG_INFO("save OK: user=%s ne=%s scope=%s result=%s",
+                 who, ne, scope, result);
         printf("%sSaved%s (HTTP 201) → %s\n",
                COLOR_GREEN, COLOR_RESET, url);
         if (resp && *resp) printf("%s\n", resp);
     } else {
+        LOG_WARN("save FAILED: user=%s ne=%s scope=%s http=%d",
+                 who, ne, scope, status);
         printf("%smgt-svc returned HTTP %d%s\n",
                COLOR_RED, status, COLOR_RESET);
         if (resp && *resp) fprintf(stderr, "%s\n", resp);
@@ -1930,7 +2002,14 @@ static void dispatch(char *line) {
     char **argv = str_split(line, &argc);
     if (!argc) { free_tokens(argv, argc); return; }
 
-    LOG_DEBUG("cmd: user=%s ne=%s >> %s", g_mgt_user, g_ne_name, line);
+    {
+        const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
+        if (*g_rhost)
+            LOG_INFO("cmd: user=%s rhost=%s ne=%s >> %s",
+                     who, g_rhost, g_ne_name, line);
+        else
+            LOG_INFO("cmd: user=%s ne=%s >> %s", who, g_ne_name, line);
+    }
 
     /* Bảng phân phối lệnh: so sánh không phân biệt hoa/thường */
     if      (strcasecmp(argv[0], "show")     == 0) cmd_show    (argv + 1, argc - 1);
@@ -2004,6 +2083,10 @@ int main(void) {
         g_cli_user[sizeof(g_cli_user) - 1] = '\0';
     }
 
+    init_rhost();
+    if (*g_rhost)
+        LOG_INFO("session start: user=%s rhost=%s", g_cli_user, g_rhost);
+
     int direct_mode = (getenv("CONFD_IPC_ADDR") || getenv("CONFD_IPC_PORT"));
     LOG_INFO("cli-netconf started, mode=%s", direct_mode ? "direct" : "ssh-server");
 
@@ -2025,7 +2108,7 @@ int main(void) {
 
         printf("Connecting to ConfD MAAPI %s%s:%d%s ...\n",
                COLOR_BOLD, host, port, COLOR_RESET);
-        LOG_DEBUG("direct mode: connecting to %s:%d user=%s", host, port, user);
+        LOG_INFO("direct mode: connecting to %s:%d user=%s", host, port, user);
         g_maapi = maapi_dial(host, port, user);
         if (!g_maapi) {
             LOG_ERROR("direct mode: MAAPI connect to %s:%d failed", host, port);
