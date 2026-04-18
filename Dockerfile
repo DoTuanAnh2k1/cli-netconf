@@ -52,7 +52,11 @@ COPY <<'AUTH_SCRIPT' /usr/local/bin/auth-mgt.sh
 # Gọi POST /aa/authenticate lên mgt-service.
 # Input: PAM_USER (env), password (stdin từ pam_exec expose_authtok).
 # Output: exit 0 = auth OK, exit 1 = auth fail.
-# Log ra /var/log/cli-netconf/auth.log (ghi rõ lý do fail — curl / http / jq).
+# Log ra:
+#   - /var/log/cli-netconf/auth.log  (file, giữ lâu dài)
+#   - /proc/1/fd/2                   (stderr của PID 1 = sshd → docker logs)
+# Ghi thẳng vào stderr PID 1 để reason hiện CÙNG STREAM với dòng
+# "Failed password" của sshd — không cần chờ tail -F, không bị tách stream.
 
 LOG=/var/log/cli-netconf/auth.log
 mkdir -p /var/log/cli-netconf 2>/dev/null
@@ -60,7 +64,10 @@ touch "$LOG" 2>/dev/null
 chmod 666 "$LOG" 2>/dev/null
 
 log() {
-    printf '[%s] [auth] %s\n' "$(date '+%F %T')" "$*" >> "$LOG"
+    local line
+    line="$(printf '[%s] [auth] %s' "$(date '+%F %T')" "$*")"
+    printf '%s\n' "$line" >> "$LOG"
+    printf '%s\n' "$line" > /proc/1/fd/2 2>/dev/null
 }
 
 # Nạp env từ file duy nhất; sshd child không có env container
@@ -256,10 +263,11 @@ echo ""
 # Sync users từ mgt-service
 /usr/local/bin/sync-users.sh
 
-# Tail log files ra stdout container để docker logs xem được real-time
+# auth-mgt.sh đã tự ghi thẳng ra /proc/1/fd/2 → docker logs rồi.
+# Chỉ cần tail session.log (do cli-wrapper.sh ghi, không qua PID 1).
 touch /var/log/cli-netconf/auth.log /var/log/cli-netconf/session.log
 chmod 666 /var/log/cli-netconf/auth.log /var/log/cli-netconf/session.log
-tail -F /var/log/cli-netconf/auth.log /var/log/cli-netconf/session.log &
+tail -F /var/log/cli-netconf/session.log &
 
 echo ""
 echo "  SSH listening on port ${SSH_PORT}"
