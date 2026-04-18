@@ -794,15 +794,34 @@ static void cmd_set(char **args, int argc) {
     REQUIRE_MAAPI();
     const char *who = (*g_mgt_user) ? g_mgt_user : g_cli_user;
 
-    /* ── Chế độ paste XML ─────────────────────────────────────── */
+    /* ── Chế độ paste ─ chấp nhận cả XML và output `show running-config` ──
+     * Nếu ký tự non-whitespace đầu tiên là '<' → XML, nạp trực tiếp.
+     * Ngược lại → text (định dạng như show running-config), convert
+     * sang XML qua fmt_text_to_xml(content, g_schema).
+     */
     if (argc == 0) {
-        char *xml = read_xml_paste();
-        if (!xml) return;
+        char *content = read_xml_paste();
+        if (!content) return;
+
+        const char *p = content;
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        bool is_xml = (*p == '<');
+
+        char *xml = is_xml ? xstrdup(content) : fmt_text_to_xml(content, g_schema);
+        free(content);
+        if (!xml) {
+            fprintf(stderr, "%sfailed to convert pasted text to XML%s\n",
+                    COLOR_RED, COLOR_RESET);
+            return;
+        }
+
         if (maapi_load_xml(g_maapi, xml) == 0) {
-            LOG_INFO("set OK (paste XML): user=%s ne=%s", who, g_ne_name);
+            LOG_INFO("set OK (paste %s): user=%s ne=%s",
+                     is_xml ? "XML" : "text", who, g_ne_name);
             printf("%sOK%s (staged in candidate)\n", COLOR_GREEN, COLOR_RESET);
         } else {
-            LOG_WARN("set FAILED (paste XML): user=%s ne=%s", who, g_ne_name);
+            LOG_WARN("set FAILED (paste %s): user=%s ne=%s",
+                     is_xml ? "XML" : "text", who, g_ne_name);
             fprintf(stderr, "%sload failed%s\n", COLOR_RED, COLOR_RESET);
         }
         free(xml);

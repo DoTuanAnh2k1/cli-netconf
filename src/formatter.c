@@ -430,81 +430,176 @@ char *fmt_xml_to_text(const char *xml_data,
     return sb.buf; /* Caller phải free */
 }
 
+/* Escape XML special chars vào strbuf (value của <leaf>value</leaf>). */
+static void sb_xml_escape(strbuf_t *sb, const char *s) {
+    if (!s) return;
+    for (; *s; s++) {
+        switch (*s) {
+            case '<':  sb_append(sb, "&lt;");  break;
+            case '>':  sb_append(sb, "&gt;");  break;
+            case '&':  sb_append(sb, "&amp;"); break;
+            case '"':  sb_append(sb, "&quot;"); break;
+            case '\'': sb_append(sb, "&apos;"); break;
+            default: {
+                char buf[2] = {*s, '\0'};
+                sb_append(sb, buf);
+                break;
+            }
+        }
+    }
+}
+
+/* Tìm schema node con theo tên (case-insensitive). */
+static schema_node_t *find_child_by_name(schema_node_t *parent, const char *name) {
+    if (!parent) return NULL;
+    for (schema_node_t *c = parent->children; c; c = c->next) {
+        if (strcasecmp(c->name, name) == 0) return c;
+    }
+    return NULL;
+}
+
 /* -------------------------------------------------------------------------
- * fmt_text_to_xml — Chuyển đổi text cấu hình thành NETCONF XML
+ * fmt_text_to_xml — Chuyển output của `show running-config` thành XML
+ *                   hợp lệ để nạp vào ConfD qua maapi_load_config.
  *
- * Phân tích định dạng text thụt lề (2 dấu cách = 1 cấp) và tạo XML.
- * Mỗi dòng có thể là:
- *   - "container_name" → mở thẻ XML: <container_name>
- *   - "leaf_name giá_trị" → thẻ leaf: <leaf_name>giá_trị</leaf_name>
+ * Format input chấp nhận (giống output của show running-config):
+ *   - Dòng đầu (tuỳ chọn) không có tab = path header từ cmd_show
+ *       eg: "eir nsmfPduSession"
+ *     Các token trong header được mở thành container ngoài. Nếu gặp list
+ *     (is_list) trước khi hết header thì dừng — list entry cụ thể sẽ do
+ *     dòng content đảm nhiệm.
+ *   - Các dòng tiếp theo bắt đầu bằng N tab (N >= 1):
+ *       "<name>: <value>"       → leaf  → <name>value</name>
+ *       "<name>"                 → container → mở <name>, push stack
+ *       "<list-name> <keyval>"   → list entry → mở <list-name>; key_val bị
+ *                                   bỏ qua vì key leaf sẽ xuất hiện lại
+ *                                   dưới dạng "key_name: keyval" ở con của nó.
+ *   - Dòng bắt đầu bằng "(" (trailing timing "(12ms, ...)") bị skip.
+ *   - Dòng rỗng / toàn khoảng trắng bị skip.
  *
- * Ví dụ đầu vào:
- *   system
- *     hostname new-name
- *
- * Kết quả XML:
- *   <system><hostname>new-name</hostname></system>
+ * Namespace: node cấp cao nhất (parent = schema root) được gắn xmlns lấy
+ * từ schema->children[*]->ns (đã populate bởi maapi_load_schema).
  *
  * Tham số:
- *   text   — chuỗi text cấu hình đầu vào
- *   schema — schema tree cho tra cứu namespace (hiện chưa dùng)
+ *   text   — chuỗi text config
+ *   schema — schema tree (để resolve namespace cho top-level node).
+ *            NULL cũng chạy, nhưng XML sẽ thiếu xmlns → ConfD reject.
  *
  * Trả về:
- *   Chuỗi XML (malloc'd, caller phải free), hoặc NULL nếu lỗi.
+ *   Chuỗi XML (malloc'd, caller phải free). Chuỗi rỗng nếu input không
+ *   có dòng content hợp lệ.
  * ---------------------------------------------------------------------- */
 char *fmt_text_to_xml(const char *text, schema_node_t *schema) {
-    (void)schema; /* Dự phòng cho tra cứu namespace trong tương lai */
     if (!text) return NULL;
 
-    strbuf_t sb  = {NULL, 0, 0};
-    char   **tags = calloc(MAX_PATH_DEPTH, sizeof(char *)); /* Stack thẻ XML đang mở */
-    int      depth = 0;  /* Độ sâu hiện tại (số thẻ đang mở) */
+    strbuf_t sb = {NULL, 0, 0};
+    char   **tags = calloc(MAX_PATH_DEPTH, sizeof(char *));
+    if (!tags) return NULL;
+    int depth = 0;        /* Tổng số thẻ mở trong stack */
+    int base_depth = 0;   /* Số thẻ mở từ path header — offset cho content */
+    bool header_done = false;
 
-    char *dup  = xstrdup(text);
-    char *line = strtok(dup, "\n");
+    char *dup = xstrdup(text);
+    if (!dup) { free(tags); return NULL; }
 
-    while (line) {
-        /* Đếm số dấu cách đầu dòng để xác định mức thụt lề (2 spaces = 1 cấp) */
-        int spaces = 0;
-        while (line[spaces] == ' ') spaces++;
-        int level = spaces / 2;
+    char *saveptr = NULL;
+    for (char *line = strtok_r(dup, "\n", &saveptr);
+         line != NULL;
+         line = strtok_r(NULL, "\n", &saveptr)) {
 
-        /* Loại bỏ khoảng trắng đầu dòng */
-        char *content = line + spaces;
-        while (*content == '\t') content++;
+        /* Strip trailing CR/space/tab */
+        char *end = line + strlen(line);
+        while (end > line &&
+               (end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t')) {
+            *--end = '\0';
+        }
+        if (*line == '\0') continue;            /* Dòng rỗng */
+        if (line[0] == '(') continue;           /* "(12ms, ...)" — timing footer */
 
-        /* Bỏ qua dòng rỗng và dòng comment (#) */
-        if (*content == '\0' || *content == '#') {
-            line = strtok(NULL, "\n");
+        /* Đếm tab đầu dòng */
+        int lvl = 0;
+        while (line[lvl] == '\t') lvl++;
+        char *content = line + lvl;
+        while (*content == ' ') content++;      /* Tab rồi có thể có space thừa */
+        if (!*content) continue;
+
+        if (lvl == 0 && !header_done) {
+            /* Path header — các token tách bằng space. Walk schema theo từng
+             * token để biết đâu là container (pre-open) và đâu là list
+             * (dừng — list entry cụ thể nằm ở content). */
+            schema_node_t *cur = schema;
+            char *ht_save = NULL;
+            for (char *tok = strtok_r(content, " ", &ht_save);
+                 tok != NULL;
+                 tok = strtok_r(NULL, " ", &ht_save)) {
+                schema_node_t *found = find_child_by_name(cur, tok);
+                if (found && found->is_list) break;     /* list → dừng */
+                if (cur == schema && found && found->ns[0]) {
+                    sb_printf(&sb, "<%s xmlns=\"%s\">", tok, found->ns);
+                } else {
+                    sb_printf(&sb, "<%s>", tok);
+                }
+                tags[depth++] = xstrdup(tok);
+                if (found) cur = found;
+                if (depth >= MAX_PATH_DEPTH - 1) break;
+            }
+            base_depth = depth;
+            header_done = true;
             continue;
         }
 
-        /* Đóng các thẻ XML thừa khi mức thụt lề giảm (quay lại cấp cha) */
-        while (depth > level) {
+        header_done = true;                     /* Sau content, không còn header */
+
+        int effective = base_depth + lvl;
+        if (effective < 1) effective = 1;
+
+        /* Đóng các thẻ thừa đến khi depth == effective - 1 (parent của dòng hiện tại) */
+        while (depth > effective - 1 && depth > 0) {
             depth--;
             sb_printf(&sb, "</%s>", tags[depth]);
             free(tags[depth]);
             tags[depth] = NULL;
         }
 
-        /* Phân tích dòng: "tên giá_trị" hoặc "tên" */
-        char *space = strchr(content, ' ');
-        if (space) {
-            /* Có dấu cách → leaf node với giá trị */
-            *space = '\0';
-            char *val = space + 1;
-            while (*val == ' ') val++; /* Bỏ khoảng trắng thừa */
-            sb_printf(&sb, "<%s>%s</%s>", content, val, content);
+        /* Phân loại dòng theo dấu ": " (leaf) hay space (list entry) */
+        char *colon = strstr(content, ": ");
+        if (colon) {
+            /* Leaf: "name: value" */
+            *colon = '\0';
+            char *name = content;
+            char *val  = colon + 2;
+            /* Trim trailing space trong name */
+            char *nend = colon;
+            while (nend > name && (nend[-1] == ' ' || nend[-1] == '\t')) *--nend = '\0';
+            sb_printf(&sb, "<%s>", name);
+            sb_xml_escape(&sb, val);
+            sb_printf(&sb, "</%s>", name);
+            /* Leaf không push stack */
         } else {
-            /* Không có dấu cách → container hoặc list (mở thẻ) */
-            sb_printf(&sb, "<%s>", content);
-            tags[depth] = xstrdup(content);
-            depth++;
+            /* Container hoặc list entry: "name" hoặc "name keyval" */
+            char *space = strchr(content, ' ');
+            if (space) *space = '\0';           /* Bỏ qua key_val — leaf sẽ emit lại */
+            char *name = content;
+            if (!*name) continue;
+
+            if (depth == 0) {
+                /* Top-level → tra namespace từ schema */
+                schema_node_t *sn = find_child_by_name(schema, name);
+                if (sn && sn->ns[0]) {
+                    sb_printf(&sb, "<%s xmlns=\"%s\">", name, sn->ns);
+                } else {
+                    sb_printf(&sb, "<%s>", name);
+                }
+            } else {
+                sb_printf(&sb, "<%s>", name);
+            }
+            if (depth < MAX_PATH_DEPTH - 1) {
+                tags[depth++] = xstrdup(name);
+            }
         }
-        line = strtok(NULL, "\n");
     }
 
-    /* Đóng tất cả thẻ XML còn đang mở */
+    /* Đóng tất cả thẻ còn mở */
     while (depth > 0) {
         depth--;
         sb_printf(&sb, "</%s>", tags[depth]);
@@ -513,5 +608,6 @@ char *fmt_text_to_xml(const char *text, schema_node_t *schema) {
 
     free(tags);
     free(dup);
+    if (!sb.buf) return xstrdup("");
     return sb.buf;
 }
