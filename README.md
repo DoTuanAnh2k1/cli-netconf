@@ -237,6 +237,8 @@ logout                             Xoá token khỏi bộ nhớ
 nodes                              Xem lại danh sách NE (cần login trước)
 
 save [--scope=X] <cmd_name>        POST CLI history lên mgt-svc
+                                     (scope mặc định: ne-config;
+                                      enum: cli-config | ne-command | ne-config)
 
 help                               Danh sách lệnh
 exit                               Thoát
@@ -312,6 +314,36 @@ running-config servers
 		address 10.0.0.2
 (8ms, 2026-04-18 14:30:52)
 ```
+
+---
+
+## Save command history (mgt-svc)
+
+`save <cmd_name>` POST lịch sử lệnh lên mgt-svc qua `POST /aa/history/save`.
+
+```
+save [--scope=X] [--result=Y] [--ne=NAME] [--ip=IP] <cmd_name...>
+```
+
+Trường `scope` quyết định log vào nhóm nào — mgt-svc filter theo
+query `?scope=...` ở `GET /aa/history`.
+
+| scope | Dùng khi | Mặc định |
+|---|---|---|
+| `ne-config` | Thao tác cấu hình NE (set/unset/commit/rollback…) | ✓ |
+| `ne-command` | Lệnh vận hành NE (show/ping/debug…) | |
+| `cli-config` | Config của chính CLI, không thuộc NE | |
+
+Ví dụ:
+
+```
+anhdt195[eir]> save set-pdu-enabled                 # scope=ne-config (mặc định)
+anhdt195[eir]> save --scope=ne-command show-status
+anhdt195[eir]> save --result=failure --scope=ne-config set-timeout
+```
+
+Token dùng cho header `Authorization` lấy từ session hiện tại (`login` /
+SSH-PAM) — không cần set thủ công.
 
 ---
 
