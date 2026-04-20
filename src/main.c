@@ -524,41 +524,79 @@ static int lookup_is_key(const char *name) {
     return 0;
 }
 
-static void path_display_hook(char **matches, int num, int max_length) {
-    (void)max_length;
-    if (!g_path_items_has_keys()) {
-        /* Fallback: dùng display mặc định của readline */
-        rl_display_match_list(matches, num, max_length);
-        return;
-    }
+/* In matches theo columns dựa trên độ rộng terminal — thay thế việc gọi
+ * rl_display_match_list từ trong hook (sẽ recurse vào chính hook này). */
+static void print_matches_columns(char **matches, int start, int end, int max_length) {
+    if (start > end) return;
+    int cols = get_terminal_rows();  /* fallback if ioctl fails */
+    struct winsize ws;
+    int cw = 80;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) cw = ws.ws_col;
+    (void)cols;
+    int col_w = max_length + 2;
+    if (col_w < 4) col_w = 4;
+    int per_row = cw / col_w;
+    if (per_row < 1) per_row = 1;
 
-    rl_crlf();
-    /* Nhóm 1: schema children (leaf/container) */
-    int printed_any = 0;
-    for (int i = 1; i <= num; i++) {
-        if (!lookup_is_key(matches[i])) {
-            if (!printed_any) {
-                printf("%sPossible completions:%s\r\n", COLOR_BOLD, COLOR_RESET);
-                printed_any = 1;
-            }
-            printf("  %s\r\n", matches[i]);
-        }
+    int c = 0;
+    for (int i = start; i <= end; i++) {
+        const char *s = matches[i];
+        int sl = (int)strlen(s);
+        fputs(s, stdout);
+        for (int k = sl; k < col_w; k++) fputc(' ', stdout);
+        c++;
+        if (c >= per_row) { fputs("\r\n", stdout); c = 0; }
     }
-    /* Nhóm 2: key value của list entry đã tồn tại */
-    int printed_keys = 0;
-    for (int i = 1; i <= num; i++) {
-        if (lookup_is_key(matches[i])) {
-            if (!printed_keys) {
-                printf("%sPossible match completions:%s\r\n", COLOR_BOLD, COLOR_RESET);
-                printed_keys = 1;
+    if (c != 0) fputs("\r\n", stdout);
+}
+
+static void path_display_hook(char **matches, int num, int max_length) {
+    /* QUAN TRỌNG: không được gọi rl_display_match_list() từ đây — hàm đó
+     * tự check hook và call lại chính hook này → infinite recursion, dẫn tới
+     * completion list in 2-3 lần và làm mất dòng gõ của user. */
+    rl_crlf();
+
+    int has_keys = g_path_items_has_keys();
+    if (!has_keys) {
+        /* Không có key → in flat như readline mặc định */
+        print_matches_columns(matches, 1, num, max_length);
+    } else {
+        /* Có cả schema children và key value → chia 2 section */
+        int leaf_start = -1, leaf_end = -1, key_start = -1, key_end = -1;
+        /* Xếp vào 2 mảng tạm (stack) để in từng section cạnh cột */
+        char **leaves = malloc(sizeof(char *) * (num + 1));
+        char **keys   = malloc(sizeof(char *) * (num + 1));
+        int nl = 0, nk = 0;
+        int max_leaf = 0, max_key = 0;
+        for (int i = 1; i <= num; i++) {
+            int slen = (int)strlen(matches[i]);
+            if (lookup_is_key(matches[i])) {
+                keys[++nk] = matches[i];
+                if (slen > max_key) max_key = slen;
+            } else {
+                leaves[++nl] = matches[i];
+                if (slen > max_leaf) max_leaf = slen;
             }
-            printf("  " COLOR_CYAN "%s" COLOR_RESET "\r\n", matches[i]);
         }
+        (void)leaf_start; (void)leaf_end; (void)key_start; (void)key_end;
+
+        if (nl > 0) {
+            printf("%sPossible completions:%s\r\n", COLOR_BOLD, COLOR_RESET);
+            print_matches_columns(leaves, 1, nl, max_leaf);
+        }
+        if (nk > 0) {
+            printf("%sPossible match completions:%s\r\n", COLOR_BOLD, COLOR_RESET);
+            /* Key in màu cyan, mỗi dòng một key cho dễ đọc */
+            for (int i = 1; i <= nk; i++)
+                printf("  " COLOR_CYAN "%s" COLOR_RESET "\r\n", keys[i]);
+        }
+        free(leaves);
+        free(keys);
     }
     fflush(stdout);
-    /* Báo readline: cursor đang ở đầu dòng trống → ép redraw prompt + input
-     * để user không mất dòng đang gõ. Thiếu 2 call này là lý do bấm TAB
-     * xong dòng command biến mất. */
+    /* Báo readline: cursor ở dòng trống mới → ép vẽ lại prompt + input để
+     * user không mất dòng đang gõ. Thiếu 2 call này là lý do bấm TAB xong
+     * dòng command biến mất. */
     rl_on_new_line();
     rl_forced_update_display();
 }
