@@ -310,10 +310,24 @@ static bool node_has_element_children(xmlNodePtr node) {
  *   path_depth  — số phần tử trong path_filter
  *   path_idx    — vị trí hiện tại đang so khớp trong path_filter
  */
+/* Tính độ rộng lớn nhất của tên các leaf con trực tiếp (để căn value thẳng
+ * hàng trong cùng một container). Chỉ tính leaf — container/list không có
+ * value để align. */
+static int compute_leaf_name_width(xmlNodePtr parent) {
+    int max = 0;
+    for (xmlNodePtr c = parent->children; c; c = c->next) {
+        if (c->type != XML_ELEMENT_NODE) continue;
+        if (node_has_element_children(c)) continue;
+        int n = (int)strlen((char *)c->name);
+        if (n > max) max = n;
+    }
+    return max;
+}
+
 static void render_node(strbuf_t *sb, xmlNodePtr node,
                          int indent, bool first_pass,
                          const char **path_filter, int path_depth,
-                         int path_idx) {
+                         int path_idx, int name_width) {
     if (node->type != XML_ELEMENT_NODE) return;
 
     const char *name = (char *)node->name;
@@ -322,10 +336,30 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
     if (path_depth > 0 && path_idx < path_depth) {
         /* So sánh tên node với phần tử hiện tại trong bộ lọc (không phân biệt hoa thường) */
         if (strcasecmp(name, path_filter[path_idx]) != 0) return;
-        /* Tìm thấy phần tử khớp → tiếp tục duyệt sâu hơn */
+        /* Nếu đã khớp phần tử cuối cùng của path:
+         *   - Leaf → render trực tiếp node này (để hiện "name: value")
+         *   - Container/list → render children như bình thường (giữ semantic
+         *     "show what's under this path", không in lại tên container).
+         * Thiếu nhánh leaf ở đây là nguyên nhân `show running-config <leaf>`
+         * không in giá trị. */
+        if (path_idx + 1 == path_depth) {
+            if (!node_has_element_children(node)) {
+                render_node(sb, node, indent, first_pass, NULL, 0, 0, 0);
+                return;
+            }
+            /* Container matched cuối path — descend nhưng dùng width riêng
+             * của container này để align các leaf con ngang hàng. */
+            int w = compute_leaf_name_width(node);
+            for (xmlNodePtr c = node->children; c; c = c->next) {
+                render_node(sb, c, indent, first_pass,
+                            path_filter, path_depth, path_idx + 1, w);
+            }
+            return;
+        }
+        /* Chưa hết path → descend với cùng width (0 = chưa khớp) */
         for (xmlNodePtr c = node->children; c; c = c->next) {
             render_node(sb, c, indent, first_pass,
-                        path_filter, path_depth, path_idx + 1);
+                        path_filter, path_depth, path_idx + 1, name_width);
         }
         return;
     }
@@ -338,29 +372,36 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
     for (int i = 0; i < pad_lvl; i++) pad[i] = '\t';
 
     if (!node_has_element_children(node)) {
-        /* Leaf: "\t*N <name>: <value>" */
+        /* Leaf: "\t*N <name>: <value>" — name màu vàng, value màu xanh.
+         * Pad spaces sau name để ":" rơi đúng cột name_width → value thẳng hàng. */
         xmlChar *content = xmlNodeGetContent(node);
-        if (first_pass) {
-            /* (chưa dùng) */
-        } else {
-            sb_printf(sb, "%s%s: %s\n",
-                      pad, name,
+        if (!first_pass) {
+            int nl = (int)strlen(name);
+            int fill = (name_width > nl) ? (name_width - nl) : 0;
+            sb_printf(sb, "%s" COLOR_YELLOW "%s" COLOR_RESET,
+                      pad, name);
+            for (int i = 0; i < fill; i++) sb_append(sb, " ");
+            sb_printf(sb, ": " COLOR_CYAN "%s" COLOR_RESET "\n",
                       content ? (char *)content : "");
         }
         xmlFree(content);
     } else {
-        /* Container hoặc list entry */
+        /* Container hoặc list entry — tên container là "path", để màu trắng
+         * (mặc định). Chỉ value (key của list entry) tô cyan để nổi bật. */
         char *key_val = get_key_value(node);
         if (key_val) {
-            sb_printf(sb, "%s%s %s\n", pad, name, key_val);
+            sb_printf(sb, "%s%s " COLOR_CYAN "%s" COLOR_RESET "\n",
+                      pad, name, key_val);
             free(key_val);
         } else {
             sb_printf(sb, "%s%s\n", pad, name);
         }
+        /* Pre-scan leaf con để align value trong container này */
+        int w = compute_leaf_name_width(node);
         for (xmlNodePtr c = node->children; c; c = c->next) {
             if (c->type == XML_ELEMENT_NODE)
                 render_node(sb, c, indent + 1, false,
-                            NULL, 0, 0);
+                            NULL, 0, 0, w);
         }
     }
 }
@@ -419,9 +460,10 @@ char *fmt_xml_to_text(const char *xml_data,
 
     /* Duyệt và hiển thị từng node con cấp cao nhất */
     if (data_node) {
+        int top_w = compute_leaf_name_width(data_node);
         for (xmlNodePtr c = data_node->children; c; c = c->next) {
             render_node(&sb, c, 0, false,
-                        path, path_len, 0);
+                        path, path_len, 0, top_w);
         }
     }
 

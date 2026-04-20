@@ -259,11 +259,22 @@ extern int confd_stream_connect(int sock, const struct sockaddr *srv,
  *   hoặc NULL nếu thất bại.
  */
 char *maapi_get_config_xml(maapi_session_t *m, int db) {
-    /* Mở read-only transaction trên datastore */
-    int th = maapi_start_trans(m->sock, db, CONFD_READ);
-    if (th < 0) {
-        LOG_WARN("maapi: start_trans(read) failed: %s", confd_lasterr());
-        return NULL;
+    /* Nếu đang có write-trans mở trên cùng datastore (CANDIDATE sau khi `set`
+     * chưa commit), reuse nó để đọc — nếu mở read-trans riêng sẽ không thấy
+     * các edit còn đang buffer trong write-trans → candidate nhìn giống hệt
+     * running. */
+    int  th;
+    bool own_trans;
+    if (m->has_write && db == CONFD_CANDIDATE) {
+        th        = m->th_write;
+        own_trans = false;
+    } else {
+        th = maapi_start_trans(m->sock, db, CONFD_READ);
+        if (th < 0) {
+            LOG_WARN("maapi: start_trans(read) failed: %s", confd_lasterr());
+            return NULL;
+        }
+        own_trans = true;
     }
 
     /*
@@ -278,7 +289,7 @@ char *maapi_get_config_xml(maapi_session_t *m, int db) {
                                 NULL);  /* NULL = không lọc theo path, lấy toàn bộ */
     if (sid < 0) {
         LOG_WARN("maapi: save_config failed: %s", confd_lasterr());
-        maapi_finish_trans(m->sock, th);
+        if (own_trans) maapi_finish_trans(m->sock, th);
         return NULL;
     }
 
@@ -291,7 +302,7 @@ char *maapi_get_config_xml(maapi_session_t *m, int db) {
 
     int ssock = socket(AF_INET, SOCK_STREAM, 0);
     if (ssock < 0) {
-        maapi_finish_trans(m->sock, th);
+        if (own_trans) maapi_finish_trans(m->sock, th);
         return NULL;
     }
 
@@ -300,14 +311,18 @@ char *maapi_get_config_xml(maapi_session_t *m, int db) {
                              sizeof(addr), sid, 0) != CONFD_OK) {
         LOG_WARN("maapi: stream_connect failed: %s", confd_lasterr());
         close(ssock);
-        maapi_finish_trans(m->sock, th);
+        if (own_trans) maapi_finish_trans(m->sock, th);
         return NULL;
     }
 
     /* Đọc toàn bộ dữ liệu XML từ stream socket vào bộ nhớ */
     size_t cap = 64 * 1024, len = 0;  /* Bắt đầu với buffer 64KB */
     char *raw = malloc(cap);
-    if (!raw) { close(ssock); maapi_finish_trans(m->sock, th); return NULL; }
+    if (!raw) {
+        close(ssock);
+        if (own_trans) maapi_finish_trans(m->sock, th);
+        return NULL;
+    }
 
     ssize_t n;
     while ((n = read(ssock, raw + len, cap - len - 1)) > 0) {
@@ -325,7 +340,7 @@ char *maapi_get_config_xml(maapi_session_t *m, int db) {
 
     /* Chờ kết quả cuối cùng từ ConfD (xác nhận hoàn tất) */
     maapi_save_config_result(m->sock, sid);
-    maapi_finish_trans(m->sock, th);
+    if (own_trans) maapi_finish_trans(m->sock, th);
 
     if (len == 0) { free(raw); return NULL; }
 

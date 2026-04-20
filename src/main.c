@@ -1708,10 +1708,10 @@ static int fetch_ne_list(const char *token, ne_item_t *out) {
  * display_ne_list — Hiển thị bảng NE ra stdout.
  */
 static void display_ne_list(const ne_item_t *list, int count) {
-    printf("\n%s%-4s  %-20s  %-20s  %-15s  %-6s  %s%s\n",
-           COLOR_BOLD, "#", "NE", "Namespace",
+    printf("\n%s%-16s  %-4s  %-20s  %-20s  %-15s  %-6s  %s%s\n",
+           COLOR_BOLD, "Site", "#", "NE", "Namespace",
            "ConfD IP", "Port", "Description", COLOR_RESET);
-    printf("────  ────────────────────  ────────────────────"
+    printf("────────────────  ────  ────────────────────  ────────────────────"
            "  ───────────────  ──────  ──────────────────────\n");
 
     for (int i = 0; i < count; i++) {
@@ -1719,7 +1719,8 @@ static void display_ne_list(const ne_item_t *list, int count) {
         /* Hiển thị conf_master_ip/conf_port_master_tcp — fallback về ip/port nếu trống */
         const char *disp_ip = ne->conf_master_ip[0] ? ne->conf_master_ip : ne->ip;
         int disp_port = ne->conf_port_master_tcp ? ne->conf_port_master_tcp : ne->port;
-        printf("%-4d  %-20s  %-20s  %-15s  %-6d  %s\n",
+        printf("%-16s  %-4d  %-20s  %-20s  %-15s  %-6d  %s\n",
+               ne->site[0]        ? ne->site        : "-",
                i + 1,
                ne->ne[0]          ? ne->ne          : "-",
                ne->ns[0]          ? ne->ns          : "-",
