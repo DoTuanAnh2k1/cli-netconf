@@ -105,6 +105,16 @@ static char             g_rhost[64] = "";
  * nhưng không set flag → giữ được hành vi cancel cũ nơi cần. */
 static int              g_quit_requested = 0;
 
+/* Cache của candidate XML dành cho tab-completion (collect_list_keys). Tránh
+ * round-trip MAAPI mỗi lần bấm TAB. Bị invalidate sau mọi lệnh có thể đổi
+ * candidate: set / unset / commit / discard / rollback. */
+static char            *g_xml_cache = NULL;
+
+static void invalidate_xml_cache(void) {
+    free(g_xml_cache);
+    g_xml_cache = NULL;
+}
+
 /**
  * init_rhost - Khởi tạo g_rhost từ biến môi trường SSH_CLIENT.
  *
@@ -408,12 +418,15 @@ static int collect_list_keys(schema_node_t *list_node, char **out, int max) {
     if (!g_maapi || !list_node || !list_node->is_list || !rl_line_buffer)
         return 0;
 
-    char *xml = maapi_get_config_xml(g_maapi, CONFD_CANDIDATE);
-    if (!xml) return 0;
+    /* Dùng cache nếu có; nếu chưa có thì fetch 1 lần rồi giữ cho lần TAB sau.
+     * Cache bị xoá bởi invalidate_xml_cache() sau các lệnh thay đổi candidate. */
+    if (!g_xml_cache) {
+        g_xml_cache = maapi_get_config_xml(g_maapi, CONFD_CANDIDATE);
+    }
+    if (!g_xml_cache) return 0;
 
-    xmlDocPtr doc = xmlReadMemory(xml, (int)strlen(xml), "c.xml", NULL,
+    xmlDocPtr doc = xmlReadMemory(g_xml_cache, (int)strlen(g_xml_cache), "c.xml", NULL,
                                    XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
-    free(xml);
     if (!doc) return 0;
 
     int count = 0;
@@ -469,6 +482,7 @@ static int collect_list_keys(schema_node_t *list_node, char **out, int max) {
 
 /* Bộ đệm completion: schema children + (nếu parent là list) key values */
 static char **g_path_items_buf = NULL;
+static int   *g_path_items_is_key = NULL;   /* parallel flag: 1 nếu item là key value */
 static int    g_path_items_count = 0;
 static int    g_path_items_idx   = 0;
 
@@ -476,9 +490,72 @@ static void free_path_items(void) {
     if (!g_path_items_buf) return;
     for (int i = 0; i < g_path_items_count; i++) free(g_path_items_buf[i]);
     free(g_path_items_buf);
+    free(g_path_items_is_key);
     g_path_items_buf = NULL;
+    g_path_items_is_key = NULL;
     g_path_items_count = 0;
     g_path_items_idx = 0;
+}
+
+/*
+ * path_display_hook — Hook hiển thị tùy biến cho tab completion (readline).
+ *
+ * Chia matches thành 2 khu riêng:
+ *   - Possible completions (leaf/container) — tên schema children
+ *   - Possible key completions           — giá trị key của list entry đang có
+ *
+ * Hook chỉ kích hoạt khi có ít nhất 1 key trong g_path_items; ngược lại để
+ * readline render mặc định. Khớp matches[1..num] với g_path_items_buf bằng
+ * so sánh chuỗi (vì matches[0] là "longest common prefix" do readline chèn).
+ */
+static int g_path_items_has_keys(void) {
+    if (!g_path_items_is_key) return 0;
+    for (int i = 0; i < g_path_items_count; i++)
+        if (g_path_items_is_key[i]) return 1;
+    return 0;
+}
+
+static int lookup_is_key(const char *name) {
+    if (!g_path_items_is_key) return 0;
+    for (int i = 0; i < g_path_items_count; i++) {
+        if (g_path_items_buf[i] && strcmp(g_path_items_buf[i], name) == 0)
+            return g_path_items_is_key[i];
+    }
+    return 0;
+}
+
+static void path_display_hook(char **matches, int num, int max_length) {
+    (void)max_length;
+    if (!g_path_items_has_keys()) {
+        /* Fallback: dùng display mặc định của readline */
+        rl_display_match_list(matches, num, max_length);
+        return;
+    }
+
+    printf("\n");
+    /* Nhóm 1: schema children (leaf/container) */
+    int printed_any = 0;
+    for (int i = 1; i <= num; i++) {
+        if (!lookup_is_key(matches[i])) {
+            if (!printed_any) {
+                printf("%sPossible completions:%s\n", COLOR_BOLD, COLOR_RESET);
+                printed_any = 1;
+            }
+            printf("  %s\n", matches[i]);
+        }
+    }
+    /* Nhóm 2: key value của list entry đã tồn tại */
+    int printed_keys = 0;
+    for (int i = 1; i <= num; i++) {
+        if (lookup_is_key(matches[i])) {
+            if (!printed_keys) {
+                printf("%sPossible match completions:%s\n", COLOR_BOLD, COLOR_RESET);
+                printed_keys = 1;
+            }
+            printf("  " COLOR_CYAN "%s" COLOR_RESET "\n", matches[i]);
+        }
+    }
+    rl_on_new_line();
 }
 
 /**
@@ -500,21 +577,25 @@ static char *path_generator(const char *text, int state) {
         if (!g_comp_parent) return NULL;
 
         int cap = 64;
-        g_path_items_buf = malloc(sizeof(char *) * cap);
-        if (!g_path_items_buf) return NULL;
+        g_path_items_buf    = malloc(sizeof(char *) * cap);
+        g_path_items_is_key = malloc(sizeof(int)    * cap);
+        if (!g_path_items_buf || !g_path_items_is_key) return NULL;
 
-        /* 1) Schema children names */
+        /* 1) Schema children names (không phải key) */
         for (schema_node_t *c = g_comp_parent->children; c; c = c->next) {
             if (g_path_items_count + 1 >= cap) {
                 cap *= 2;
                 char **nb = realloc(g_path_items_buf, sizeof(char *) * cap);
-                if (!nb) break;
-                g_path_items_buf = nb;
+                int   *kb = realloc(g_path_items_is_key, sizeof(int) * cap);
+                if (!nb || !kb) break;
+                g_path_items_buf    = nb;
+                g_path_items_is_key = kb;
             }
+            g_path_items_is_key[g_path_items_count] = 0;
             g_path_items_buf[g_path_items_count++] = xstrdup(c->name);
         }
 
-        /* 2) Nếu parent là list → thêm key value hiện có */
+        /* 2) Nếu parent là list → thêm key value hiện có (đánh dấu is_key=1) */
         if (g_comp_parent->is_list) {
             char *keys[256];
             int nk = collect_list_keys(g_comp_parent, keys, 256);
@@ -522,9 +603,12 @@ static char *path_generator(const char *text, int state) {
                 if (g_path_items_count + 1 >= cap) {
                     cap *= 2;
                     char **nb = realloc(g_path_items_buf, sizeof(char *) * cap);
-                    if (!nb) { free(keys[i]); continue; }
-                    g_path_items_buf = nb;
+                    int   *kb = realloc(g_path_items_is_key, sizeof(int) * cap);
+                    if (!nb || !kb) { free(keys[i]); continue; }
+                    g_path_items_buf    = nb;
+                    g_path_items_is_key = kb;
                 }
+                g_path_items_is_key[g_path_items_count] = 1;
                 g_path_items_buf[g_path_items_count++] = keys[i];  /* đã xstrdup */
             }
         }
@@ -1758,6 +1842,15 @@ static int json_extract_int(const char *json, const char *key, int def) {
     return def;
 }
 
+/* Comparator cho qsort: sort NE list theo (site, ne) — case-insensitive trên site. */
+static int ne_cmp_by_site(const void *a, const void *b) {
+    const ne_item_t *x = (const ne_item_t *)a;
+    const ne_item_t *y = (const ne_item_t *)b;
+    int c = strcasecmp(x->site, y->site);
+    if (c != 0) return c;
+    return strcasecmp(x->ne, y->ne);
+}
+
 /*
  * fetch_ne_list — Gọi GET /aa/list/ne, parse JSON, trả về mảng ne_item_t.
  *
@@ -1829,6 +1922,10 @@ static int fetch_ne_list(const char *token, ne_item_t *out) {
     }
 
     free(resp);
+
+    /* Sort theo site_name để NE cùng site đứng liền nhau, dễ nhìn hơn. */
+    if (count > 1) qsort(out, (size_t)count, sizeof(ne_item_t), ne_cmp_by_site);
+
     return count;
 }
 
@@ -2449,6 +2546,16 @@ static void dispatch(char *line) {
             LOG_INFO("cmd: user=%s ne=%s >> %s", who, g_ne_name, line);
     }
 
+    /* Lệnh thay đổi candidate → invalidate cache XML của tab-completion để
+     * vòng TAB kế tiếp nhìn thấy state mới. */
+    if (strcasecmp(argv[0], "set")      == 0 ||
+        strcasecmp(argv[0], "unset")    == 0 ||
+        strcasecmp(argv[0], "commit")   == 0 ||
+        strcasecmp(argv[0], "discard")  == 0 ||
+        strcasecmp(argv[0], "rollback") == 0) {
+        invalidate_xml_cache();
+    }
+
     /* Bảng phân phối lệnh: so sánh không phân biệt hoa/thường */
     if      (strcasecmp(argv[0], "show")     == 0) cmd_show    (argv + 1, argc - 1);
     else if (strcasecmp(argv[0], "set")      == 0) cmd_set     (argv + 1, argc - 1);
@@ -2492,6 +2599,7 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     rl_catch_signals = 0;  /* Tắt xử lý tín hiệu mặc định của readline, dùng handler riêng */
     rl_attempted_completion_function = maapi_completer;  /* Đăng ký hàm tab-completion */
+    rl_completion_display_matches_hook = path_display_hook;  /* 2-section display (leaf vs key) */
     rl_variable_bind("expand-tilde", "off");  /* Tắt mở rộng dấu ~ trong readline */
 
     /* Nạp env từ file trước tiên — sshd child không kế thừa env container.
