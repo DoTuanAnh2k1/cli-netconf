@@ -452,12 +452,16 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
         xmlFree(content);
     } else {
         /* Container hoặc list entry — tên container là "path", để màu trắng
-         * (mặc định). Chỉ value (key của list entry) tô cyan để nổi bật. */
+         * (mặc định). Chỉ value (key của list entry) tô cyan để nổi bật.
+         * List entry: children thụt thêm 1 cấp so với container thường để
+         * tách rõ phạm vi của entry khi có nhiều list cùng cấp. */
         char *key_val = get_key_value(node);
+        int  child_indent = indent + 1;
         if (key_val) {
             sb_printf(sb, "%s%s " COLOR_CYAN "%s" COLOR_RESET "\n",
                       pad, name, key_val);
             free(key_val);
+            child_indent = indent + 2;
         } else {
             sb_printf(sb, "%s%s\n", pad, name);
         }
@@ -469,10 +473,10 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
             if (is_leaflist_member(c)) {
                 if (!is_first_by_name(c)) continue;
                 emit_leaflist_inline(sb, node, (char *)c->name,
-                                     indent + 2, w);
+                                     child_indent + 1, w);
                 continue;
             }
-            render_node(sb, c, indent + 1, false, NULL, 0, 0, w);
+            render_node(sb, c, child_indent, false, NULL, 0, 0, w);
         }
     }
 }
