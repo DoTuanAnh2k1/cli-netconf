@@ -406,18 +406,29 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
             }
             /* Container matched cuối path — descend nhưng dùng width riêng
              * của container này để align các leaf con ngang hàng. Gom
-             * leaf-list thành 1 dòng bracket. */
+             * leaf-list thành 1 dòng bracket.
+             *
+             * Nếu node là list entry (có sibling cùng tên), đặt key leaf
+             * (child đầu tiên) ở indent hiện tại và các leaf/container còn
+             * lại thụt thêm 1 cấp — giúp mắt phân biệt từng entry khi trong
+             * list có nhiều entry liên tiếp. */
             int w = compute_leaf_name_width(node);
+            int is_entry = is_list_entry(node);
+            int seen_first = 0;
             for (xmlNodePtr c = node->children; c; c = c->next) {
                 if (c->type != XML_ELEMENT_NODE) continue;
+                int ci = indent;
+                if (is_entry && seen_first) ci = indent + 1;
                 if (is_leaflist_member(c)) {
                     if (!is_first_by_name(c)) continue;
                     emit_leaflist_inline(sb, node, (char *)c->name,
-                                         indent + 1, w);
+                                         ci + 1, w);
+                    seen_first = 1;
                     continue;
                 }
-                render_node(sb, c, indent, first_pass,
+                render_node(sb, c, ci, first_pass,
                             path_filter, path_depth, path_idx + 1, w);
+                seen_first = 1;
             }
             return;
         }
