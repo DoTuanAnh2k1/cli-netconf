@@ -324,6 +324,63 @@ static int compute_leaf_name_width(xmlNodePtr parent) {
     return max;
 }
 
+/* Phát hiện leaf-list: node `c` là leaf (không có element children) VÀ có
+ * anh/em cùng tên cũng là leaf. Trả true nếu là thành viên leaf-list. */
+static bool is_leaflist_member(xmlNodePtr c) {
+    if (node_has_element_children(c)) return false;
+    const char *name = (const char *)c->name;
+    xmlNodePtr parent = c->parent;
+    if (!parent) return false;
+    for (xmlNodePtr s = parent->children; s; s = s->next) {
+        if (s == c || s->type != XML_ELEMENT_NODE) continue;
+        if (strcmp((char *)s->name, name) != 0) continue;
+        if (node_has_element_children(s)) continue;  /* mixed → YANG list, not leaf-list */
+        return true;
+    }
+    return false;
+}
+
+/* Kiểm tra node `c` có phải lần xuất hiện đầu tiên của tên này trong parent
+ * hay không. Dùng để chỉ emit leaf-list 1 lần tại vị trí đầu. */
+static bool is_first_by_name(xmlNodePtr c) {
+    const char *name = (const char *)c->name;
+    xmlNodePtr parent = c->parent;
+    if (!parent) return true;
+    for (xmlNodePtr s = parent->children; s && s != c; s = s->next) {
+        if (s->type == XML_ELEMENT_NODE && strcmp((char *)s->name, name) == 0)
+            return false;
+    }
+    return true;
+}
+
+/* Emit tất cả giá trị của leaf-list (tất cả siblings cùng tên) inline dạng
+ *   <pad>name    : [ v1 v2 v3 ... ]
+ * Name vàng, nội dung cyan, giống leaf thường. */
+static void emit_leaflist_inline(strbuf_t *sb, xmlNodePtr parent,
+                                  const char *name, int indent,
+                                  int name_width) {
+    char pad[64] = {0};
+    int pad_lvl = indent;
+    if (pad_lvl > 60) pad_lvl = 60;
+    for (int i = 0; i < pad_lvl; i++) pad[i] = '\t';
+
+    int nl = (int)strlen(name);
+    int fill = (name_width > nl) ? (name_width - nl) : 0;
+    sb_printf(sb, "%s" COLOR_YELLOW "%s" COLOR_RESET, pad, name);
+    for (int i = 0; i < fill; i++) sb_append(sb, " ");
+    sb_append(sb, ": " COLOR_CYAN "[ ");
+    for (xmlNodePtr s = parent->children; s; s = s->next) {
+        if (s->type != XML_ELEMENT_NODE) continue;
+        if (strcmp((char *)s->name, name) != 0) continue;
+        if (node_has_element_children(s)) continue;
+        xmlChar *content = xmlNodeGetContent(s);
+        sb_printf(sb, "%s ", content ? (char *)content : "");
+        xmlFree(content);
+    }
+    sb_append(sb, "]" COLOR_RESET "\n");
+}
+
+
 static void render_node(strbuf_t *sb, xmlNodePtr node,
                          int indent, bool first_pass,
                          const char **path_filter, int path_depth,
@@ -348,9 +405,17 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
                 return;
             }
             /* Container matched cuối path — descend nhưng dùng width riêng
-             * của container này để align các leaf con ngang hàng. */
+             * của container này để align các leaf con ngang hàng. Gom
+             * leaf-list thành 1 dòng bracket. */
             int w = compute_leaf_name_width(node);
             for (xmlNodePtr c = node->children; c; c = c->next) {
+                if (c->type != XML_ELEMENT_NODE) continue;
+                if (is_leaflist_member(c)) {
+                    if (!is_first_by_name(c)) continue;
+                    emit_leaflist_inline(sb, node, (char *)c->name,
+                                         indent + 1, w);
+                    continue;
+                }
                 render_node(sb, c, indent, first_pass,
                             path_filter, path_depth, path_idx + 1, w);
             }
@@ -396,12 +461,18 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
         } else {
             sb_printf(sb, "%s%s\n", pad, name);
         }
-        /* Pre-scan leaf con để align value trong container này */
+        /* Pre-scan leaf con để align value trong container này. Gom
+         * leaf-list (nhiều leaf cùng tên) thành 1 dòng bracket. */
         int w = compute_leaf_name_width(node);
         for (xmlNodePtr c = node->children; c; c = c->next) {
-            if (c->type == XML_ELEMENT_NODE)
-                render_node(sb, c, indent + 1, false,
-                            NULL, 0, 0, w);
+            if (c->type != XML_ELEMENT_NODE) continue;
+            if (is_leaflist_member(c)) {
+                if (!is_first_by_name(c)) continue;
+                emit_leaflist_inline(sb, node, (char *)c->name,
+                                     indent + 2, w);
+                continue;
+            }
+            render_node(sb, c, indent + 1, false, NULL, 0, 0, w);
         }
     }
 }

@@ -52,6 +52,8 @@
 #include "confd_compat.h"
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
 #include "cli.h"
 #include "log.h"
 #include "maapi-direct.h"
@@ -386,11 +388,106 @@ static schema_node_t *find_completion_parent(void) {
     return node;
 }
 
+/*
+ * collect_list_keys — Fetch candidate XML và extract key value của các entry
+ *                     đang tồn tại dưới list `list_node`. Dùng cho tab
+ *                     completion: khi user ở vị trí chọn list entry, hiện
+ *                     danh sách key đã có (giống ConfD CLI).
+ *
+ * Thuật toán:
+ *   1. Parse tokens của rl_line_buffer (bỏ show/running-config ở đầu).
+ *   2. Walk XML doc theo tokens (bỏ token cuối = tên list), đến được
+ *      element parent của list entries.
+ *   3. Iterate children với name = list_node->name, extract element con
+ *      đầu tiên (= key leaf) → copy value.
+ *
+ * Trả về số key copy được. Các string trong out[] là malloc'd, caller
+ * chịu trách nhiệm free.
+ */
+static int collect_list_keys(schema_node_t *list_node, char **out, int max) {
+    if (!g_maapi || !list_node || !list_node->is_list || !rl_line_buffer)
+        return 0;
+
+    char *xml = maapi_get_config_xml(g_maapi, CONFD_CANDIDATE);
+    if (!xml) return 0;
+
+    xmlDocPtr doc = xmlReadMemory(xml, (int)strlen(xml), "c.xml", NULL,
+                                   XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
+    free(xml);
+    if (!doc) return 0;
+
+    int count = 0;
+    char **tokens = str_split(rl_line_buffer, &count);
+    if (!tokens) { xmlFreeDoc(doc); return 0; }
+
+    int start_idx = 1;
+    if (count > 1 && strcasecmp(tokens[0], "show") == 0) start_idx = 2;
+
+    int line_len = (int)strlen(rl_line_buffer);
+    int end_idx  = count;
+    if (line_len > 0 && rl_line_buffer[line_len - 1] != ' ')
+        end_idx = count - 1;  /* token cuối là partial, bỏ qua */
+
+    /* Walk XML từ root, bỏ token cuối (tên list), chỉ đến parent của list */
+    xmlNodePtr cur = xmlDocGetRootElement(doc);  /* <config xmlns=...> */
+    for (int i = start_idx; i < end_idx - 1 && cur; i++) {
+        xmlNodePtr next = NULL;
+        for (xmlNodePtr c = cur->children; c; c = c->next) {
+            if (c->type == XML_ELEMENT_NODE &&
+                strcasecmp((char *)c->name, tokens[i]) == 0) {
+                next = c; break;
+            }
+        }
+        cur = next;
+    }
+    if (!cur) {
+        xmlFreeDoc(doc);
+        free_tokens(tokens, count);
+        return 0;
+    }
+
+    /* Iterate children với tên list_node->name, lấy element con đầu tiên làm key */
+    int n = 0;
+    for (xmlNodePtr c = cur->children; c && n < max; c = c->next) {
+        if (c->type != XML_ELEMENT_NODE) continue;
+        if (strcasecmp((char *)c->name, list_node->name) != 0) continue;
+        for (xmlNodePtr k = c->children; k; k = k->next) {
+            if (k->type != XML_ELEMENT_NODE) continue;
+            xmlChar *val = xmlNodeGetContent(k);
+            if (val && *val) {
+                out[n++] = xstrdup((char *)val);
+            }
+            if (val) xmlFree(val);
+            break;  /* chỉ lấy leaf đầu tiên = key */
+        }
+    }
+
+    xmlFreeDoc(doc);
+    free_tokens(tokens, count);
+    return n;
+}
+
+/* Bộ đệm completion: schema children + (nếu parent là list) key values */
+static char **g_path_items_buf = NULL;
+static int    g_path_items_count = 0;
+static int    g_path_items_idx   = 0;
+
+static void free_path_items(void) {
+    if (!g_path_items_buf) return;
+    for (int i = 0; i < g_path_items_count; i++) free(g_path_items_buf[i]);
+    free(g_path_items_buf);
+    g_path_items_buf = NULL;
+    g_path_items_count = 0;
+    g_path_items_idx = 0;
+}
+
 /**
  * path_generator - Hàm sinh gợi ý cho đường dẫn schema YANG.
  *
- * Duyệt qua các node con của node cha (tìm bởi find_completion_parent)
- * và trả về lần lượt các tên node khớp với tiền tố `text`.
+ * Xây dựng danh sách completion ở state==0: bao gồm tên các schema children
+ * của parent, VÀ nếu parent là YANG list thì cả các key value đang tồn tại
+ * trong candidate config (giống ConfD CLI `show full-configuration ... <list>`
+ * trả về các entry đã tạo).
  *
  * @param text   Tiền tố mà người dùng đã gõ
  * @param state  0 = lần gọi đầu tiên, != 0 = lần gọi tiếp theo
@@ -398,15 +495,46 @@ static schema_node_t *find_completion_parent(void) {
  */
 static char *path_generator(const char *text, int state) {
     if (!state) {
-        /* Lần gọi đầu: xác định node cha và bắt đầu từ con đầu tiên */
+        free_path_items();
         g_comp_parent = find_completion_parent();
-        g_comp_cur = g_comp_parent ? g_comp_parent->children : NULL;
+        if (!g_comp_parent) return NULL;
+
+        int cap = 64;
+        g_path_items_buf = malloc(sizeof(char *) * cap);
+        if (!g_path_items_buf) return NULL;
+
+        /* 1) Schema children names */
+        for (schema_node_t *c = g_comp_parent->children; c; c = c->next) {
+            if (g_path_items_count + 1 >= cap) {
+                cap *= 2;
+                char **nb = realloc(g_path_items_buf, sizeof(char *) * cap);
+                if (!nb) break;
+                g_path_items_buf = nb;
+            }
+            g_path_items_buf[g_path_items_count++] = xstrdup(c->name);
+        }
+
+        /* 2) Nếu parent là list → thêm key value hiện có */
+        if (g_comp_parent->is_list) {
+            char *keys[256];
+            int nk = collect_list_keys(g_comp_parent, keys, 256);
+            for (int i = 0; i < nk; i++) {
+                if (g_path_items_count + 1 >= cap) {
+                    cap *= 2;
+                    char **nb = realloc(g_path_items_buf, sizeof(char *) * cap);
+                    if (!nb) { free(keys[i]); continue; }
+                    g_path_items_buf = nb;
+                }
+                g_path_items_buf[g_path_items_count++] = keys[i];  /* đã xstrdup */
+            }
+        }
     }
-    while (g_comp_cur) {
-        schema_node_t *n = g_comp_cur;
-        g_comp_cur = g_comp_cur->next;
-        if (strncasecmp(n->name, text, strlen(text)) == 0)
-            return strdup(n->name);
+
+    size_t tlen = strlen(text);
+    while (g_path_items_idx < g_path_items_count) {
+        const char *it = g_path_items_buf[g_path_items_idx++];
+        if (strncasecmp(it, text, tlen) == 0)
+            return strdup(it);
     }
     return NULL;
 }
