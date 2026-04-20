@@ -532,16 +532,16 @@ static void path_display_hook(char **matches, int num, int max_length) {
         return;
     }
 
-    printf("\n");
+    rl_crlf();
     /* Nhóm 1: schema children (leaf/container) */
     int printed_any = 0;
     for (int i = 1; i <= num; i++) {
         if (!lookup_is_key(matches[i])) {
             if (!printed_any) {
-                printf("%sPossible completions:%s\n", COLOR_BOLD, COLOR_RESET);
+                printf("%sPossible completions:%s\r\n", COLOR_BOLD, COLOR_RESET);
                 printed_any = 1;
             }
-            printf("  %s\n", matches[i]);
+            printf("  %s\r\n", matches[i]);
         }
     }
     /* Nhóm 2: key value của list entry đã tồn tại */
@@ -549,13 +549,18 @@ static void path_display_hook(char **matches, int num, int max_length) {
     for (int i = 1; i <= num; i++) {
         if (lookup_is_key(matches[i])) {
             if (!printed_keys) {
-                printf("%sPossible match completions:%s\n", COLOR_BOLD, COLOR_RESET);
+                printf("%sPossible match completions:%s\r\n", COLOR_BOLD, COLOR_RESET);
                 printed_keys = 1;
             }
-            printf("  " COLOR_CYAN "%s" COLOR_RESET "\n", matches[i]);
+            printf("  " COLOR_CYAN "%s" COLOR_RESET "\r\n", matches[i]);
         }
     }
+    fflush(stdout);
+    /* Báo readline: cursor đang ở đầu dòng trống → ép redraw prompt + input
+     * để user không mất dòng đang gõ. Thiếu 2 call này là lý do bấm TAB
+     * xong dòng command biến mất. */
     rl_on_new_line();
+    rl_forced_update_display();
 }
 
 /**
