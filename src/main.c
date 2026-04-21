@@ -2542,6 +2542,244 @@ static void cmd_rollback(char **args, int argc) {
 }
 
 /*
+ * cmd_bench - Hidden benchmark command.
+ *
+ * Usage:
+ *   bench <path...> <N> [key_prefix]
+ *
+ * Walk schema theo <path...>. Path phải kết thúc ở 1 YANG list có n_keys == 1.
+ * Sinh N list entry với key = "<prefix><idx>" (prefix mặc định "bench_"),
+ * nạp candidate qua maapi_load_xml, validate, commit. In thời gian từng pha.
+ *
+ * Các entry chỉ có key leaf — không set thêm leaf khác. Đủ để đo đường load +
+ * commit cho danh sách N entry.
+ */
+static void cmd_bench(char **args, int argc) {
+    REQUIRE_MAAPI();
+    if (argc < 2) {
+        fprintf(stderr,
+            "%sUsage:%s bench <path...> <N> [key_prefix]\n"
+            "  eg: bench system ntp server 1000\n"
+            "      bench system ntp server 1000 node_\n",
+            COLOR_CYAN, COLOR_RESET);
+        return;
+    }
+    if (!g_schema) {
+        fprintf(stderr, "%sNo schema loaded.%s\n", COLOR_RED, COLOR_RESET);
+        return;
+    }
+
+    /* Tách N và prefix từ đuôi args.
+     * N luôn là phần tử cuối cùng hoặc áp chót (nếu có prefix). */
+    int path_argc = argc;
+    const char *key_prefix = "bench_";
+    char *endp = NULL;
+    long n_last = strtol(args[argc - 1], &endp, 10);
+    if (endp && *endp == '\0' && n_last > 0) {
+        /* Arg cuối là N */
+        path_argc = argc - 1;
+    } else if (argc >= 3) {
+        /* Arg cuối có thể là key_prefix, áp chót là N */
+        endp = NULL;
+        long n_prev = strtol(args[argc - 2], &endp, 10);
+        if (endp && *endp == '\0' && n_prev > 0) {
+            n_last = n_prev;
+            key_prefix = args[argc - 1];
+            path_argc = argc - 2;
+        } else {
+            fprintf(stderr, "%sInvalid N — expected positive integer.%s\n",
+                    COLOR_RED, COLOR_RESET);
+            return;
+        }
+    } else {
+        fprintf(stderr, "%sInvalid N — expected positive integer.%s\n",
+                COLOR_RED, COLOR_RESET);
+        return;
+    }
+    int N = (int)n_last;
+    if (path_argc < 1) {
+        fprintf(stderr, "%sMissing path to list.%s\n", COLOR_RED, COLOR_RESET);
+        return;
+    }
+
+    /* Walk schema theo path_argc token, ghi nhận node + xmlns của token đầu. */
+    schema_node_t *chain[MAX_PATH_DEPTH];
+    int chain_len = 0;
+    schema_node_t *cur = g_schema;
+    for (int i = 0; i < path_argc; i++) {
+        schema_node_t *found = NULL;
+        for (schema_node_t *c = cur->children; c; c = c->next) {
+            if (strcasecmp(c->name, args[i]) == 0) { found = c; break; }
+        }
+        if (!found) {
+            fprintf(stderr, "%sUnknown node '%s'%s at depth %d\n",
+                    COLOR_RED, args[i], COLOR_RESET, i);
+            return;
+        }
+        if (chain_len >= MAX_PATH_DEPTH) {
+            fprintf(stderr, "%sPath too deep.%s\n", COLOR_RED, COLOR_RESET);
+            return;
+        }
+        chain[chain_len++] = found;
+        cur = found;
+    }
+
+    schema_node_t *list_node = chain[chain_len - 1];
+    if (!list_node->is_list) {
+        fprintf(stderr, "%sLast path token '%s' is not a YANG list.%s\n",
+                COLOR_RED, list_node->name, COLOR_RESET);
+        return;
+    }
+    if (list_node->n_keys != 1) {
+        fprintf(stderr, "%sOnly single-key lists supported by bench (got n_keys=%d).%s\n",
+                COLOR_RED, list_node->n_keys, COLOR_RESET);
+        return;
+    }
+    const char *key_name = list_node->keys[0];
+
+    printf("%sBench:%s N=%d path=", COLOR_BOLD, COLOR_RESET, N);
+    for (int i = 0; i < chain_len; i++) printf("%s%s", i ? "/" : "", chain[i]->name);
+    printf(" key=%s prefix=%s\n", key_name, key_prefix);
+    fflush(stdout);
+
+    /* ── Pha 1: generate XML ────────────────────────────────── */
+    struct timeval tg0; gettimeofday(&tg0, NULL);
+
+    size_t cap = 4096;
+    size_t len = 0;
+    char *xml = malloc(cap);
+    if (!xml) { fprintf(stderr, "oom\n"); return; }
+    xml[0] = '\0';
+
+    /* Ước lượng ~70 byte/entry + wrapper. Pre-reserve. */
+    size_t want = (size_t)N * 96 + 4096;
+    if (want > cap) { cap = want; xml = realloc(xml, cap); if (!xml) { fprintf(stderr, "oom\n"); return; } }
+
+    /* Mở các thẻ ngoài (tất cả trừ cái cuối = list-name). Thẻ đầu gắn xmlns. */
+    for (int i = 0; i < chain_len - 1; i++) {
+        int need;
+        if (i == 0 && chain[i]->ns[0]) {
+            need = snprintf(xml + len, cap - len, "<%s xmlns=\"%s\">",
+                            chain[i]->name, chain[i]->ns);
+        } else {
+            need = snprintf(xml + len, cap - len, "<%s>", chain[i]->name);
+        }
+        if (need < 0) { fprintf(stderr, "snprintf err\n"); free(xml); return; }
+        if ((size_t)need >= cap - len) {
+            cap = (len + need + 1) * 2;
+            xml = realloc(xml, cap);
+            if (!xml) { fprintf(stderr, "oom\n"); return; }
+            need = snprintf(xml + len, cap - len, "<%s>", chain[i]->name);
+        }
+        len += need;
+    }
+
+    /* Nếu chain chỉ có 1 node (chính là list) và là top-level, cần xmlns trên
+     * thẻ list. */
+    const char *list_xmlns = (chain_len == 1 && list_node->ns[0]) ? list_node->ns : NULL;
+
+    /* N list entry */
+    for (int i = 1; i <= N; i++) {
+        /* Grow buffer nếu còn < 256 byte */
+        if (cap - len < 256) {
+            cap *= 2;
+            xml = realloc(xml, cap);
+            if (!xml) { fprintf(stderr, "oom\n"); return; }
+        }
+        int need;
+        if (list_xmlns) {
+            need = snprintf(xml + len, cap - len,
+                            "<%s xmlns=\"%s\"><%s>%s%d</%s></%s>",
+                            list_node->name, list_xmlns,
+                            key_name, key_prefix, i, key_name,
+                            list_node->name);
+        } else {
+            need = snprintf(xml + len, cap - len,
+                            "<%s><%s>%s%d</%s></%s>",
+                            list_node->name,
+                            key_name, key_prefix, i, key_name,
+                            list_node->name);
+        }
+        if (need < 0 || (size_t)need >= cap - len) {
+            cap = (len + 512) * 2;
+            xml = realloc(xml, cap);
+            if (!xml) { fprintf(stderr, "oom\n"); return; }
+            i--;
+            continue;
+        }
+        len += need;
+    }
+
+    /* Đóng các thẻ ngoài (ngược thứ tự) */
+    for (int i = chain_len - 2; i >= 0; i--) {
+        if (cap - len < 256) {
+            cap *= 2;
+            xml = realloc(xml, cap);
+            if (!xml) { fprintf(stderr, "oom\n"); return; }
+        }
+        int need = snprintf(xml + len, cap - len, "</%s>", chain[i]->name);
+        len += need;
+    }
+
+    long ms_gen = elapsed_ms(&tg0);
+    size_t xml_size = len;
+
+    /* ── Pha 2: load_xml ───────────────────────────────────── */
+    struct timeval tl0; gettimeofday(&tl0, NULL);
+    int rc_load = maapi_load_xml(g_maapi, xml);
+    long ms_load = elapsed_ms(&tl0);
+    free(xml);
+
+    if (rc_load != 0) {
+        fprintf(stderr, "%sload_xml failed%s\n", COLOR_RED, COLOR_RESET);
+        LOG_WARN("bench load_xml FAILED: user=%s ne=%s N=%d",
+                 (*g_mgt_user) ? g_mgt_user : g_cli_user, g_ne_name, N);
+        return;
+    }
+
+    /* ── Pha 3: validate ───────────────────────────────────── */
+    struct timeval tv0; gettimeofday(&tv0, NULL);
+    int rc_val = maapi_do_validate(g_maapi);
+    long ms_val = elapsed_ms(&tv0);
+
+    if (rc_val != 0) {
+        fprintf(stderr, "%svalidate failed%s\n", COLOR_RED, COLOR_RESET);
+        LOG_WARN("bench validate FAILED: user=%s ne=%s N=%d",
+                 (*g_mgt_user) ? g_mgt_user : g_cli_user, g_ne_name, N);
+        return;
+    }
+
+    /* ── Pha 4: commit ─────────────────────────────────────── */
+    struct timeval tc0; gettimeofday(&tc0, NULL);
+    int rc_commit = maapi_do_commit(g_maapi);
+    long ms_commit = elapsed_ms(&tc0);
+
+    if (rc_commit != 0) {
+        fprintf(stderr, "%scommit failed%s\n", COLOR_RED, COLOR_RESET);
+        LOG_WARN("bench commit FAILED: user=%s ne=%s N=%d",
+                 (*g_mgt_user) ? g_mgt_user : g_cli_user, g_ne_name, N);
+        return;
+    }
+
+    long ms_total = ms_gen + ms_load + ms_val + ms_commit;
+    invalidate_xml_cache();
+
+    printf("\n%sBench results (N=%d, XML=%zu bytes):%s\n",
+           COLOR_BOLD, N, xml_size, COLOR_RESET);
+    printf("  %-12s %8ld ms\n", "generate",  ms_gen);
+    printf("  %-12s %8ld ms  (%.2f ms/entry)\n",
+           "load_xml", ms_load, N > 0 ? (double)ms_load / N : 0.0);
+    printf("  %-12s %8ld ms\n", "validate",  ms_val);
+    printf("  %-12s %8ld ms  (%.2f ms/entry)\n",
+           "commit",   ms_commit, N > 0 ? (double)ms_commit / N : 0.0);
+    printf("  %-12s %8ld ms  (%.2f ms/entry)\n",
+           "TOTAL",    ms_total, N > 0 ? (double)ms_total / N : 0.0);
+    LOG_INFO("bench OK: user=%s ne=%s N=%d gen=%ld load=%ld val=%ld commit=%ld",
+             (*g_mgt_user) ? g_mgt_user : g_cli_user, g_ne_name,
+             N, ms_gen, ms_load, ms_val, ms_commit);
+}
+
+/*
  * cmd_help - Hiển thị bảng trợ giúp với danh sách lệnh và ví dụ sử dụng.
  */
 static void cmd_help(void) {
@@ -2625,7 +2863,8 @@ static void dispatch(char *line) {
         strcasecmp(argv[0], "unset")    == 0 ||
         strcasecmp(argv[0], "commit")   == 0 ||
         strcasecmp(argv[0], "discard")  == 0 ||
-        strcasecmp(argv[0], "rollback") == 0) {
+        strcasecmp(argv[0], "rollback") == 0 ||
+        strcasecmp(argv[0], "bench")    == 0) {
         invalidate_xml_cache();
     }
 
@@ -2644,6 +2883,7 @@ static void dispatch(char *line) {
     else if (strcasecmp(argv[0], "logout")   == 0) cmd_logout  ();
     else if (strcasecmp(argv[0], "save")     == 0) cmd_save    (argv + 1, argc - 1);
     else if (strcasecmp(argv[0], "nodes")    == 0) cmd_nodes   ();
+    else if (strcasecmp(argv[0], "bench")    == 0) cmd_bench   (argv + 1, argc - 1);
     else if (strcasecmp(argv[0], "help")     == 0) cmd_help    ();
     else if (strcasecmp(argv[0], "?")        == 0) cmd_help    ();
     else
