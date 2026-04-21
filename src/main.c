@@ -1852,8 +1852,10 @@ typedef struct ne_item {
     char description[128];
     char ns[64];              /* namespace */
     int  port;
-    char conf_master_ip[64];  /* IP dùng để kết nối ConfD MAAPI */
-    int  conf_port_master_tcp;/* Port ConfD IPC (MAAPI) */
+    char conf_master_ip[64];  /* IP master ConfD MAAPI */
+    int  conf_port_master_tcp;/* Port ConfD IPC (MAAPI) master */
+    char conf_slave_ip[64];   /* IP slave — fallback khi master không kết nối được */
+    int  conf_port_slave_tcp; /* Port ConfD IPC slave */
 } ne_item_t;
 
 #define NE_LIST_MAX 128
@@ -1956,8 +1958,10 @@ static int fetch_ne_list(const char *token, ne_item_t *out) {
         if ((s = json_extract_string(obj, "description")))  { snprintf(ne->description, sizeof(ne->description), "%s", s); free(s); }
         if ((s = json_extract_string(obj, "namespace")))       { snprintf(ne->ns,             sizeof(ne->ns),             "%s", s); free(s); }
         if ((s = json_extract_string(obj, "conf_master_ip"))) { snprintf(ne->conf_master_ip, sizeof(ne->conf_master_ip), "%s", s); free(s); }
+        if ((s = json_extract_string(obj, "conf_slave_ip")))  { snprintf(ne->conf_slave_ip,  sizeof(ne->conf_slave_ip),  "%s", s); free(s); }
         ne->port                = json_extract_int(obj, "port", 0);
         ne->conf_port_master_tcp = json_extract_int(obj, "conf_port_master_tcp", 0);
+        ne->conf_port_slave_tcp  = json_extract_int(obj, "conf_port_slave_tcp", 0);
 
         free(obj);
         count++;
@@ -2268,10 +2272,36 @@ static int select_and_connect_ne(void) {
             LOG_INFO("NE selected: user=%s NE=%s (%s:%d)",
                      g_mgt_user, chosen->ne, conn_ip, conn_port);
         g_maapi = maapi_dial(conn_ip, conn_port, maapi_user);
+
+        /* Master failed → thử slave nếu mgt-svc có trả về thông tin slave. */
+        if (!g_maapi && chosen->conf_slave_ip[0] && chosen->conf_port_slave_tcp) {
+            const char *slave_ip   = chosen->conf_slave_ip;
+            int         slave_port = chosen->conf_port_slave_tcp;
+            LOG_WARN("master %s:%d unreachable, trying slave %s:%d (NE=%s)",
+                     conn_ip, conn_port, slave_ip, slave_port, chosen->ne);
+            fprintf(stderr, "%sMaster %s:%d unreachable, trying slave %s:%d...%s\n",
+                    COLOR_YELLOW, conn_ip, conn_port, slave_ip, slave_port, COLOR_RESET);
+            g_maapi = maapi_dial(slave_ip, slave_port, maapi_user);
+            if (g_maapi) {
+                conn_ip   = slave_ip;
+                conn_port = slave_port;
+                LOG_INFO("connected to slave NE=%s %s:%d", chosen->ne, conn_ip, conn_port);
+            }
+        }
+
         if (!g_maapi) {
-            LOG_ERROR("MAAPI connect failed: NE=%s %s:%d", chosen->ne, conn_ip, conn_port);
-            fprintf(stderr, "%sMAAPI connect to %s:%d failed. Please select another NE.%s\n",
-                    COLOR_RED, conn_ip, conn_port, COLOR_RESET);
+            LOG_ERROR("MAAPI connect failed: NE=%s master=%s:%d slave=%s:%d",
+                      chosen->ne, conn_ip, conn_port,
+                      chosen->conf_slave_ip[0] ? chosen->conf_slave_ip : "-",
+                      chosen->conf_port_slave_tcp);
+            if (chosen->conf_slave_ip[0]) {
+                fprintf(stderr, "%sMAAPI connect failed: master %s:%d and slave %s:%d both unreachable.%s\n",
+                        COLOR_RED, conn_ip, conn_port,
+                        chosen->conf_slave_ip, chosen->conf_port_slave_tcp, COLOR_RESET);
+            } else {
+                fprintf(stderr, "%sMAAPI connect to %s:%d failed. Please select another NE.%s\n",
+                        COLOR_RED, conn_ip, conn_port, COLOR_RESET);
+            }
             display_ne_list(nes, ne_count);
             continue;  /* Cho chọn lại */
         }
