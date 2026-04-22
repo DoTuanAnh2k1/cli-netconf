@@ -79,7 +79,7 @@ static maapi_session_t *g_maapi   = NULL;
 static schema_node_t   *g_schema  = NULL;
 
 /* Chuỗi prompt hiển thị trên dòng lệnh readline */
-static char             g_prompt[256];
+static char             g_prompt[512];
 
 /* Tên thiết bị mạng (Network Element), hiển thị trong prompt */
 static char             g_ne_name[128] = "confd";
@@ -329,8 +329,6 @@ static char *cmd_generator(const char *text, int state) {
 
 /* Node cha dùng cho completion hiện tại */
 static schema_node_t *g_comp_parent = NULL;
-/* Node con đang duyệt (iterator) */
-static schema_node_t *g_comp_cur    = NULL;
 
 /**
  * find_completion_parent - Tìm node cha trong cây schema dựa trên đường dẫn
@@ -662,27 +660,6 @@ static char *path_generator(const char *text, int state) {
         const char *it = g_path_items_buf[g_path_items_idx++];
         if (strncasecmp(it, text, tlen) == 0)
             return strdup(it);
-    }
-    return NULL;
-}
-
-/**
- * show_sub_generator - Hàm sinh gợi ý cho lệnh con của "show".
- *
- * Gợi ý "running-config" hoặc "candidate-config" sau khi gõ "show ".
- *
- * @param text   Tiền tố người dùng đã gõ
- * @param state  0 = lần gọi đầu tiên, != 0 = lần gọi tiếp theo
- * @return       Chuỗi gợi ý (malloc'd) hoặc NULL khi hết
- */
-static char *show_sub_generator(const char *text, int state) {
-    static const char *subs[] = {"running-config", "candidate-config", NULL};
-    static int idx;
-    if (!state) idx = 0;
-    while (subs[idx]) {
-        const char *s = subs[idx++];
-        if (strncasecmp(s, text, strlen(text)) == 0)
-            return strdup(s);
     }
     return NULL;
 }
