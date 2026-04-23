@@ -27,6 +27,9 @@ SRCS := $(SRCDIR)/main.c       \
         $(SRCDIR)/maapi.c      \
         $(SRCDIR)/schema.c     \
         $(SRCDIR)/formatter.c  \
+        $(SRCDIR)/json_util.c  \
+        $(SRCDIR)/args_util.c  \
+        $(SRCDIR)/set_plan.c   \
         $(SRCDIR)/log.c
 
 # ----- CONFD_LIB: đường dẫn đến libconfd.so -----
@@ -80,7 +83,7 @@ LDFLAGS := $(RL_LDFLAGS) $(XML2_LDFLAGS) $(CONFD_LDFLAGS)
 OBJS := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o, $(SRCS))
 
 # ============================================================
-.PHONY: all clean run
+.PHONY: all clean run test coverage
 
 all: $(TARGET)
 
@@ -95,10 +98,93 @@ $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET)
+	rm -rf $(OBJDIR) $(TARGET) $(TESTDIR)/bin
 
 run: all
 	LD_LIBRARY_PATH=$$(dirname $(CONFD_LIB)):$$LD_LIBRARY_PATH \
 	CONFD_IPC_ADDR=$${CONFD_IPC_ADDR:-127.0.0.1} \
 	CONFD_IPC_PORT=$${CONFD_IPC_PORT:-4565} \
 	./$(TARGET)
+
+# ============================================================
+# Unit tests — không cần ConfD runtime, không link libconfd.
+# Chỉ test các module pure (json_util, formatter, args_util, schema).
+# Gọi: make test   (CONFD_LIB vẫn cần cho Makefile parse, nhưng không link)
+# ============================================================
+TESTDIR := tests
+TESTBIN := $(TESTDIR)/bin
+TEST_CFLAGS := -Wall -Wextra -O0 -g -std=c11 -D_GNU_SOURCE \
+               -I$(INCDIR) -I$(TESTDIR) $(XML2_CFLAGS)
+
+TEST_LDFLAGS := $(XML2_LDFLAGS)
+
+TEST_BINS := \
+    $(TESTBIN)/test_json \
+    $(TESTBIN)/test_formatter \
+    $(TESTBIN)/test_text_to_xml \
+    $(TESTBIN)/test_keypath \
+    $(TESTBIN)/test_set_plan
+
+$(TESTBIN):
+	mkdir -p $(TESTBIN)
+
+# test_json: chỉ phụ thuộc json_util.c — không cần gì khác
+$(TESTBIN)/test_json: $(TESTDIR)/test_json.c $(SRCDIR)/json_util.c | $(TESTBIN)
+	$(CC) $(TEST_CFLAGS) -o $@ $^
+
+# test_formatter: formatter.c + schema.c + libxml2
+$(TESTBIN)/test_formatter: $(TESTDIR)/test_formatter.c \
+                            $(SRCDIR)/formatter.c $(SRCDIR)/schema.c | $(TESTBIN)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(TEST_LDFLAGS)
+
+# test_text_to_xml: cùng deps với test_formatter
+$(TESTBIN)/test_text_to_xml: $(TESTDIR)/test_text_to_xml.c \
+                              $(SRCDIR)/formatter.c $(SRCDIR)/schema.c | $(TESTBIN)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(TEST_LDFLAGS)
+
+# test_keypath: args_util.c + schema.c (không cần libconfd)
+$(TESTBIN)/test_keypath: $(TESTDIR)/test_keypath.c \
+                          $(SRCDIR)/args_util.c $(SRCDIR)/schema.c | $(TESTBIN)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(TEST_LDFLAGS)
+
+# test_set_plan: set_plan.c + schema.c
+$(TESTBIN)/test_set_plan: $(TESTDIR)/test_set_plan.c \
+                           $(SRCDIR)/set_plan.c $(SRCDIR)/schema.c | $(TESTBIN)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(TEST_LDFLAGS)
+
+test: $(TEST_BINS)
+	@fail=0; \
+	for t in $(TEST_BINS); do \
+	    echo "▶ $$t"; \
+	    $$t || fail=$$((fail+1)); \
+	done; \
+	echo ""; \
+	if [ $$fail -eq 0 ]; then \
+	    printf '\033[32mAll test binaries passed.\033[0m\n'; \
+	else \
+	    printf '\033[31m%d test binary(ies) had failures.\033[0m\n' $$fail; \
+	    exit 1; \
+	fi
+
+# ============================================================
+# Code coverage — build tests với gcov instrumentation, chạy, gen report.
+# Gọi: make coverage CONFD_LIB=./libconfd-server.so
+# Output: tests/bin/*.gcov (per source file) + tóm tắt %
+# ============================================================
+COV_FLAGS := -fprofile-arcs -ftest-coverage
+
+coverage:
+	@rm -rf $(TESTBIN)
+	$(MAKE) test CONFD_LIB=$(CONFD_LIB) \
+	    TEST_CFLAGS="-Wall -Wextra -O0 -g -std=c11 -D_GNU_SOURCE \
+	                 -I$(INCDIR) -I$(TESTDIR) $(XML2_CFLAGS) $(COV_FLAGS)" \
+	    TEST_LDFLAGS="$(XML2_LDFLAGS) $(COV_FLAGS)"
+	@echo ""
+	@echo "─── gcov report ──────────────────────────────────"
+	@cd $(TESTBIN) && for src in json_util args_util set_plan formatter schema; do \
+	    gcno=$$(ls *-$$src.gcno 2>/dev/null | head -1); \
+	    [ -z "$$gcno" ] && continue; \
+	    base=$${gcno%.gcno}; \
+	    gcov -n "$$base" 2>/dev/null | \
+	        awk -v f=$$src '/File.*'$$src'\.c/{p=1;next} p && /Lines executed/{print f": "$$0; exit}'; \
+	done

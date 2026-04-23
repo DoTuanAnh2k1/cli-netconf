@@ -118,21 +118,7 @@ bool maapi_load_schema(const char *host, int port, schema_node_t **out_schema);
 /* High-level: reuse existing maapi_session connection info */
 bool maapi_load_schema_into(maapi_session_t *m, schema_node_t **out_schema);
 
-/* ─── Path conversion ───────────────────────────────────── */
-
-/*
- * Chuyển space-separated path tokens thành ConfD keypath string.
- *
- * Input:  schema, args = ["system","ntp","server","10.0.0.1","prefer"], argc=5
- * Output: "/system/ntp/server{10.0.0.1}/prefer"  (*consumed = 5)
- *
- * Nếu node là is_list, token tiếp theo được bọc trong {} làm key.
- * Trả về malloc'd string (caller free), hoặc NULL nếu path không tìm thấy.
- * *consumed = số token đã dùng (phần còn lại = value).
- */
-char *args_to_keypath(schema_node_t *schema,
-                      char **args, int argc,
-                      int *consumed);
+/* args_to_keypath — pure helper, declaration ở cli.h vì không phụ thuộc MAAPI. */
 
 #endif /* WITH_MAAPI */
 #endif /* MAAPI_DIRECT_H */

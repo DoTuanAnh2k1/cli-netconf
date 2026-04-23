@@ -57,6 +57,8 @@
 #include "cli.h"
 #include "log.h"
 #include "maapi-direct.h"
+#include "json_util.h"
+#include "set_plan.h"
 
 /* ─── Forward declarations ─────────────────────────────────── */
 static int select_and_connect_ne(void);
@@ -958,31 +960,6 @@ static char *read_xml_paste(void) {
  * @param argc  Số lượng tham số (0 = chế độ paste XML)
  */
 /*
- * print_children_hint — In danh sách các con của một schema node ra stderr.
- *
- * Dùng để cung cấp gợi ý schema-aware khi user gõ sai cú pháp set/unset:
- * nhờ đó user biết được tại vị trí hiện tại có thể gõ tiếp những tên nào,
- * và loại của từng tên (leaf / list / container).
- */
-static void print_children_hint(schema_node_t *node) {
-    if (!node || !node->children) return;
-    fprintf(stderr, "  %savailable%s: ", COLOR_DIM, COLOR_RESET);
-    bool first = true;
-    for (schema_node_t *c = node->children; c; c = c->next) {
-        /* Ẩn key leaf khi node là list — key đã được cung cấp qua key value
-         * trong keypath ({john}), user không nên set lại leaf key bằng tên. */
-        if (node->is_list && schema_is_key_leaf(node, c->name)) continue;
-        if (!first) fprintf(stderr, ", ");
-        const char *tag = c->is_list ? " [list]"
-                       : c->is_leaf ? ""
-                       : " [container]";
-        fprintf(stderr, "%s%s", c->name, tag);
-        first = false;
-    }
-    fprintf(stderr, "\n");
-}
-
-/*
  * do_single_set — Đặt 1 leaf duy nhất. Log + in kết quả.
  * Trả về 0 nếu OK, -1 nếu fail.
  */
@@ -1060,202 +1037,62 @@ static void cmd_set(char **args, int argc) {
         return;
     }
 
-    /* ── Chế độ keypath ConfD trực tiếp ───────────────────────── */
-    if (args[0][0] == '/') {
-        if (argc < 2) {
-            fprintf(stderr,
-                "%sUsage (keypath)%s: set <keypath> <value>\n"
-                "  eg: set /system/hostname edge-01\n"
-                "      set /system/ntp/server{10.0.0.1}/prefer true\n",
-                COLOR_RED, COLOR_RESET);
-            return;
-        }
-        do_single_set(args[0], args[1], who);
+    /* ── Delegate parsing/validation sang plan_set (pure, testable) ─── */
+    set_plan_t *plan = plan_set(g_schema, args, argc);
+    if (!plan) {
+        fprintf(stderr, "%soom building plan%s\n", COLOR_RED, COLOR_RESET);
+        return;
+    }
+    if (plan->err) {
+        fprintf(stderr, "%s%s%s\n", COLOR_RED, plan->err, COLOR_RESET);
+        set_plan_free(plan);
         return;
     }
 
-    /* ── Chế độ token: duyệt schema tree ─────────────────────── */
-    size_t cap = 512;
-    char  *kp  = malloc(cap);
-    if (!kp) return;
-    size_t len = 0;
-    kp[0] = '\0';
-
-    schema_node_t *node = g_schema;   /* Node hiện tại trong schema */
-    int i = 0;
-
-    while (i < argc) {
-        const char *token = args[i];
-
-        /* Tìm child có tên khớp (case-insensitive) */
-        schema_node_t *child = NULL;
-        for (schema_node_t *c = node->children; c; c = c->next) {
-            if (strcasecmp(c->name, token) == 0) { child = c; break; }
+    /* ── Execute phase: loop ops, gọi MAAPI tương ứng ──────────── */
+    int ok = 0, fail = 0;
+    for (int j = 0; j < plan->n_ops; j++) {
+        set_op_t *op = &plan->ops[j];
+        if (op->kind == SET_OP_CREATE_ENTRY) {
+            if (maapi_create_list_entry(g_maapi, op->keypath) == 0) ok++;
+            else {
+                LOG_WARN("create list entry FAILED: user=%s ne=%s path=%s",
+                         who, g_ne_name, op->keypath);
+                fprintf(stderr, "%screate list entry %s failed%s\n",
+                        COLOR_RED, op->keypath, COLOR_RESET);
+                fail++;
+            }
+        } else {
+            if (do_single_set(op->keypath, op->value, who) == 0) ok++;
+            else fail++;
         }
-
-        if (!child) {
-            fprintf(stderr, "%sUnknown node '%s'%s at path %s\n",
-                    COLOR_RED, token, COLOR_RESET, *kp ? kp : "/");
-            print_children_hint(node);
-            free(kp);
-            return;
-        }
-
-        /* Nối tên node vào keypath */
-        size_t needed = len + 1 + strlen(child->name) + 1;
-        while (needed >= cap) { cap *= 2; kp = realloc(kp, cap); }
-        len += (size_t)snprintf(kp + len, cap - len, "/%s", child->name);
-        i++;
-
-        /* ── LEAF: token kế tiếp là giá trị, kết thúc ──────── */
-        if (child->is_leaf) {
-            if (i >= argc) {
-                fprintf(stderr,
-                    "%sMissing value for leaf '%s'%s\n"
-                    "  eg: set ... %s <value>\n",
-                    COLOR_RED, child->name, COLOR_RESET, child->name);
-                free(kp);
-                return;
-            }
-            if (i + 1 < argc) {
-                fprintf(stderr,
-                    "%sLeaf '%s' chỉ nhận 1 giá trị, có thừa: '%s'...%s\n"
-                    "  eg: set ... %s <value>\n",
-                    COLOR_RED, child->name, args[i+1], COLOR_RESET,
-                    child->name);
-                free(kp);
-                return;
-            }
-            do_single_set(kp, args[i], who);
-            free(kp);
-            return;
-        }
-
-        /* ── LIST: token kế tiếp là key value ──────────────── */
-        if (child->is_list) {
-            if (i >= argc) {
-                fprintf(stderr,
-                    "%sMissing key value for list '%s'%s\n"
-                    "  eg: set %s <key> [<leaf> <value> ...]\n",
-                    COLOR_RED, child->name, COLOR_RESET, kp);
-                print_children_hint(child);
-                free(kp);
-                return;
-            }
-            const char *key = args[i];
-            size_t kneeded = len + strlen(key) + 3;
-            while (kneeded >= cap) { cap *= 2; kp = realloc(kp, cap); }
-            len += (size_t)snprintf(kp + len, cap - len, "{%s}", key);
-            i++;
-            node = child;  /* Xuống list entry (children = leaves của list) */
-
-            /* Không còn arg → chỉ tạo entry rỗng → không khả thi qua set đơn.
-             * Yêu cầu user cung cấp ít nhất 1 leaf/value. */
-            if (i >= argc) {
-                fprintf(stderr,
-                    "%sList entry '%s{%s}' cần ít nhất 1 leaf/value%s\n"
-                    "  eg: set %s <leaf> <value> [<leaf> <value> ...]\n",
-                    COLOR_RED, child->name, key, COLOR_RESET, kp);
-                print_children_hint(child);
-                free(kp);
-                return;
-            }
-
-            /* Peek token kế tiếp: nếu là LEAF con của list → batch mode.
-             * Nếu là container / nested list → tiếp tục duyệt xuống. */
-            schema_node_t *peek = NULL;
-            for (schema_node_t *c = child->children; c; c = c->next) {
-                if (strcasecmp(c->name, args[i]) == 0) { peek = c; break; }
-            }
-
-            if (peek && peek->is_leaf) {
-                /* ── BATCH: remaining = <leaf> <value> cặp đôi ─ */
-                int remaining = argc - i;
-                if (remaining % 2 != 0) {
-                    fprintf(stderr,
-                        "%sCần số chẵn token (cặp <leaf> <value>), có %d%s\n"
-                        "  eg: set %s role admin email john@x.com\n",
-                        COLOR_RED, remaining, COLOR_RESET, kp);
-                    print_children_hint(child);
-                    free(kp);
-                    return;
-                }
-
-                /* Đảm bảo list entry tồn tại trước khi set leaves — nếu
-                 * entry chưa có, maapi_set_elem2 trên leaf của nó có thể
-                 * fail với "path not exists". maapi_create_list_entry
-                 * idempotent (đã tồn tại cũng OK). */
-                if (maapi_create_list_entry(g_maapi, kp) != 0) {
-                    fprintf(stderr, "%screate list entry %s failed%s\n",
-                            COLOR_RED, kp, COLOR_RESET);
-                    free(kp);
-                    return;
-                }
-
-                int ok = 0, fail = 0;
-                for (int j = i; j + 1 < argc; j += 2) {
-                    const char *lname = args[j];
-                    const char *lval  = args[j+1];
-
-                    /* Kiểm tra leaf có tồn tại trong list */
-                    schema_node_t *lc = NULL;
-                    for (schema_node_t *c = child->children; c; c = c->next) {
-                        if (strcasecmp(c->name, lname) == 0) { lc = c; break; }
-                    }
-                    if (!lc || !lc->is_leaf) {
-                        fprintf(stderr,
-                            "%s'%s' không phải leaf trong list '%s'%s\n",
-                            COLOR_RED, lname, child->name, COLOR_RESET);
-                        print_children_hint(child);
-                        fail++;
-                        continue;
-                    }
-                    /* Không cho set lại key leaf — đã cung cấp qua key value */
-                    if (schema_is_key_leaf(child, lc->name)) {
-                        fprintf(stderr,
-                            "%s'%s' là key của list '%s' — đã được set qua key value, bỏ qua%s\n",
-                            COLOR_RED, lc->name, child->name, COLOR_RESET);
-                        fail++;
-                        continue;
-                    }
-
-                    /* Ghép full keypath = kp + "/" + leaf_name */
-                    size_t fp_cap = len + strlen(lc->name) + 2;
-                    char *fp = malloc(fp_cap);
-                    if (!fp) { fail++; continue; }
-                    snprintf(fp, fp_cap, "%s/%s", kp, lc->name);
-
-                    if (do_single_set(fp, lval, who) == 0) ok++;
-                    else fail++;
-                    free(fp);
-                }
-
-                if (fail == 0)
-                    printf("%sDone%s — %d leaf(s) set under %s\n",
-                           COLOR_GREEN, COLOR_RESET, ok, kp);
-                else
-                    printf("%s%d OK, %d failed%s under %s\n",
-                           COLOR_YELLOW, ok, fail, COLOR_RESET, kp);
-                free(kp);
-                return;
-            }
-
-            /* peek không phải leaf → tiếp tục vòng lặp, sẽ duyệt nested node
-             * (container/nested list) ở iteration kế tiếp. */
-            continue;
-        }
-
-        /* ── CONTAINER: đi sâu xuống ───────────────────────── */
-        node = child;
     }
 
-    /* Thoát loop mà chưa gặp leaf/list-với-value → đường dẫn chưa đủ */
-    fprintf(stderr,
-        "%sĐường dẫn chưa đầy đủ — cần trỏ tới leaf hoặc list%s\n"
-        "  at: %s\n",
-        COLOR_RED, COLOR_RESET, *kp ? kp : "/");
-    print_children_hint(node);
-    free(kp);
+    /* ── User-facing summary: phụ thuộc shape của plan ──────── */
+    switch (plan->shape) {
+    case SET_SHAPE_SINGLE_LEAF:
+        /* do_single_set đã print "OK kp value=..." hoặc "set failed". */
+        break;
+    case SET_SHAPE_KEY_ONLY:
+        if (fail == 0) {
+            LOG_INFO("set OK (key only): user=%s ne=%s path=%s",
+                     who, g_ne_name, plan->list_kp);
+            printf("%sOK%s %s (entry created)\n",
+                   COLOR_GREEN, COLOR_RESET, plan->list_kp);
+        }
+        break;
+    case SET_SHAPE_BATCH_LIST:
+        /* plan->n_ops = 1 (create) + N (leaves). Trừ create ra khi báo cáo. */
+        if (fail == 0)
+            printf("%sDone%s — %d leaf(s) set under %s\n",
+                   COLOR_GREEN, COLOR_RESET, plan->n_ops - 1, plan->list_kp);
+        else
+            printf("%s%d OK, %d failed%s under %s\n",
+                   COLOR_YELLOW, ok, fail, COLOR_RESET, plan->list_kp);
+        break;
+    }
+
+    set_plan_free(plan);
 }
 
 /**
@@ -1481,33 +1318,6 @@ static int parse_url(const char *url, char *host, size_t hsz,
     host[hostlen] = '\0';
     snprintf(path, psz, "%s", slash ? slash : "/");
     return 0;
-}
-
-/*
- * json_escape — Escape chuỗi để nhúng vào JSON.
- * Trả về malloc'd string, caller phải free.
- */
-static char *json_escape(const char *s) {
-    if (!s) return strdup("");
-    size_t cap = strlen(s) * 6 + 1;
-    char *out = malloc(cap);
-    if (!out) return NULL;
-    char *q = out;
-    for (const char *p = s; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        switch (c) {
-            case '"':  *q++ = '\\'; *q++ = '"';  break;
-            case '\\': *q++ = '\\'; *q++ = '\\'; break;
-            case '\n': *q++ = '\\'; *q++ = 'n';  break;
-            case '\r': *q++ = '\\'; *q++ = 'r';  break;
-            case '\t': *q++ = '\\'; *q++ = 't';  break;
-            default:
-                if (c < 0x20) q += sprintf(q, "\\u%04x", c);
-                else          *q++ = (char)c;
-        }
-    }
-    *q = '\0';
-    return out;
 }
 
 /* Timeout cho HTTP client (giây) — đảm bảo không bao giờ hang CLI */
@@ -1773,52 +1583,6 @@ static void mgt_endpoint(char *buf, size_t bufsz, const char *path) {
     snprintf(buf, bufsz, "%s%s", mgt_base_url(), path);
 }
 
-/*
- * json_extract_string — Lấy giá trị string của field "key" trong JSON body.
- *
- * Parser tối giản: tìm "key", bỏ qua khoảng trắng và dấu ':',
- * sau đó copy chuỗi nằm giữa cặp dấu ngoặc kép (xử lý \" và \\).
- * Trả về malloc'd string (caller free), hoặc NULL nếu không tìm thấy.
- */
-static char *json_extract_string(const char *json, const char *key) {
-    if (!json || !key) return NULL;
-
-    /* Tìm "key" — cần khớp đúng pattern "<key>" để tránh nhầm với prefix khác */
-    size_t klen = strlen(key);
-    char  *needle = malloc(klen + 4);
-    if (!needle) return NULL;
-    snprintf(needle, klen + 4, "\"%s\"", key);
-
-    const char *p = strstr(json, needle);
-    free(needle);
-    if (!p) return NULL;
-    p += klen + 2;  /* sau "key" */
-
-    /* Bỏ qua whitespace, ':' */
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != ':') return NULL;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != '"') return NULL;
-    p++;
-
-    /* Tìm dấu " kết thúc, xử lý escape */
-    const char *start = p;
-    while (*p && *p != '"') {
-        if (*p == '\\' && *(p+1)) p += 2;
-        else                       p++;
-    }
-    if (*p != '"') return NULL;
-
-    size_t len = (size_t)(p - start);
-    char  *out = malloc(len + 1);
-    if (!out) return NULL;
-    /* Copy nguyên si — JWT không chứa escape thật, đủ cho use case này */
-    memcpy(out, start, len);
-    out[len] = '\0';
-    return out;
-}
-
 /* ─── NE list từ mgt-svc ──────────────────────────────────────── */
 
 /* Thông tin một Network Element lấy từ API /aa/list/ne */
@@ -1836,33 +1600,6 @@ typedef struct ne_item {
 } ne_item_t;
 
 #define NE_LIST_MAX 128
-
-/*
- * json_extract_int — Lấy giá trị integer của field "key" trong JSON object.
- * Trả về giá trị int, hoặc def nếu không tìm thấy.
- */
-static int json_extract_int(const char *json, const char *key, int def) {
-    if (!json || !key) return def;
-
-    size_t klen = strlen(key);
-    char *needle = malloc(klen + 4);
-    if (!needle) return def;
-    snprintf(needle, klen + 4, "\"%s\"", key);
-
-    const char *p = strstr(json, needle);
-    free(needle);
-    if (!p) return def;
-    p += klen + 2;
-
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != ':') return def;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-
-    if (*p == '-' || (*p >= '0' && *p <= '9'))
-        return atoi(p);
-    return def;
-}
 
 /* Comparator cho qsort: sort NE list theo (site, ne) — case-insensitive trên site. */
 static int ne_cmp_by_site(const void *a, const void *b) {

@@ -1,5 +1,9 @@
 # Build artifacts
 /obj/
+/tests/bin/
+*.gcno
+*.gcda
+*.gcov
 
 # Leftover build artifacts and binaries
 /bin/

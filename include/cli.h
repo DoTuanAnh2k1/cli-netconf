@@ -59,6 +59,14 @@ schema_node_t *schema_parse_yang(const char *yang_text, const char *ns);
 char         **schema_child_names(schema_node_t *node, int *count);
 
 /* -------------------------------------------------------------------------
+ * Path conversion — space-separated token[] + schema walk → ConfD keypath.
+ * Pure logic (không cần ConfD lib). Impl ở src/args_util.c.
+ * ---------------------------------------------------------------------- */
+char *args_to_keypath(schema_node_t *schema,
+                      char **args, int argc,
+                      int *consumed);
+
+/* -------------------------------------------------------------------------
  * Forward declarations — formatter.c
  * ---------------------------------------------------------------------- */
 char *fmt_xml_to_text(const char *xml_data, const char **path, int path_len);
