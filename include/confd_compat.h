@@ -192,6 +192,14 @@ void confd_init_vsn_sz(const char *name, FILE *estream, int debug_level,
 
 int         confd_load_schemas(const struct sockaddr *srv, int srv_sz);
 const char *confd_lasterr(void);
+
+/* ─── confd_errno — numeric error code from last failed call ─ */
+/* Subset that we care about; full list in ConfD confd_lib.h */
+#define CONFD_ERR_NOEXISTS         1
+#define CONFD_ERR_ALREADY_EXISTS   2
+extern int *confd_errno_location(void);
+#define confd_errno (*confd_errno_location())
+
 const char *confd_hash2str(uint32_t hash);
 int         confd_get_nslist(struct confd_nsinfo **listp);
 struct confd_cs_node *confd_find_cs_root(uint32_t ns);

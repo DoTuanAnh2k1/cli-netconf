@@ -399,12 +399,17 @@ int maapi_create_list_entry(maapi_session_t *m, const char *keypath) {
     int rc = maapi_create(m->sock, m->th_write, "%s", keypath);
     if (rc == CONFD_OK) return 0;
 
-    /* "already exists" → OK, coi như idempotent */
+    /* Entry đã tồn tại → OK, coi như idempotent. Kiểm tra chính xác bằng
+     * confd_errno (== CONFD_ERR_ALREADY_EXISTS). Fallback sang so chuỗi
+     * với confd_lasterr() vì 1 số phiên bản ConfD đặt errno khác cho cùng
+     * tình huống (ví dụ: child leaves đã tồn tại khi set lại list entry). */
+    if (confd_errno == CONFD_ERR_ALREADY_EXISTS) return 0;
     const char *err = confd_lasterr();
     if (err && (strstr(err, "exists") || strstr(err, "already"))) {
         return 0;
     }
-    LOG_WARN("maapi: create %s failed: %s", keypath, err ? err : "?");
+    LOG_WARN("maapi: create %s failed: errno=%d err=%s",
+             keypath, confd_errno, err ? err : "?");
     return -1;
 }
 

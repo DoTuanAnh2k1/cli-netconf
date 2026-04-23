@@ -277,6 +277,25 @@ static char *get_key_value(xmlNodePtr node) {
 }
 
 /*
+ * is_key_leaf_of_list_entry — heuristic: leaf này có phải là key leaf của
+ * 1 list entry không. Dùng để tô màu khác (cyan) với leaf thường (yellow).
+ *
+ * Quy tắc:
+ *   - Cha là list entry (có sibling cùng tên).
+ *   - Leaf là element con đầu tiên của cha (trong YANG list, key được đặt
+ *     làm child đầu tiên khi ConfD serialize).
+ */
+static bool is_key_leaf_of_list_entry(xmlNodePtr leaf) {
+    if (!leaf || !leaf->parent) return false;
+    if (!is_list_entry(leaf->parent)) return false;
+    for (xmlNodePtr c = leaf->parent->children; c; c = c->next) {
+        if (c->type != XML_ELEMENT_NODE) continue;
+        return c == leaf;  /* First element child */
+    }
+    return false;
+}
+
+/*
  * node_has_element_children — Kiểm tra xem node XML có element con không
  *
  * Dùng để phân biệt leaf (không có element con) và container/list (có element con).
@@ -448,33 +467,40 @@ static void render_node(strbuf_t *sb, xmlNodePtr node,
     for (int i = 0; i < pad_lvl; i++) pad[i] = '\t';
 
     if (!node_has_element_children(node)) {
-        /* Leaf: "\t*N <name>: <value>" — name màu vàng, value màu xanh.
+        /* Leaf: "\t*N <name>: <value>"
+         *   - name: cyan nếu là key của list entry, vàng cho leaf thường
+         *   - value: cyan
          * Pad spaces sau name để ":" rơi đúng cột name_width → value thẳng hàng. */
         xmlChar *content = xmlNodeGetContent(node);
         if (!first_pass) {
             int nl = (int)strlen(name);
             int fill = (name_width > nl) ? (name_width - nl) : 0;
-            sb_printf(sb, "%s" COLOR_YELLOW "%s" COLOR_RESET,
-                      pad, name);
+            const char *name_color = is_key_leaf_of_list_entry(node)
+                                     ? COLOR_CYAN : COLOR_YELLOW;
+            sb_printf(sb, "%s%s%s" COLOR_RESET, pad, name_color, name);
             for (int i = 0; i < fill; i++) sb_append(sb, " ");
             sb_printf(sb, ": " COLOR_CYAN "%s" COLOR_RESET "\n",
                       content ? (char *)content : "");
         }
         xmlFree(content);
     } else {
-        /* Container hoặc list entry — tên container là "path", để màu trắng
-         * (mặc định). Chỉ value (key của list entry) tô cyan để nổi bật.
+        /* Container hoặc list entry:
+         *   - Container name: trắng (nổi rõ hơn default trên dark bg).
+         *   - List entry header: "<container-name> <key_value>" — name trắng,
+         *     key_value cyan.
          * List entry: children thụt thêm 1 cấp so với container thường để
          * tách rõ phạm vi của entry khi có nhiều list cùng cấp. */
         char *key_val = get_key_value(node);
         int  child_indent = indent + 1;
         if (key_val) {
-            sb_printf(sb, "%s%s " COLOR_CYAN "%s" COLOR_RESET "\n",
+            sb_printf(sb, "%s" COLOR_WHITE "%s" COLOR_RESET
+                          " " COLOR_CYAN "%s" COLOR_RESET "\n",
                       pad, name, key_val);
             free(key_val);
             child_indent = indent + 2;
         } else {
-            sb_printf(sb, "%s%s\n", pad, name);
+            sb_printf(sb, "%s" COLOR_WHITE "%s" COLOR_RESET "\n",
+                      pad, name);
         }
         /* Pre-scan leaf con để align value trong container này. Gom
          * leaf-list (nhiều leaf cùng tên) thành 1 dòng bracket. */

@@ -88,6 +88,7 @@ char *xstrdup(const char *s);
 #define COLOR_GREEN  "\033[32m"
 #define COLOR_YELLOW "\033[33m"
 #define COLOR_CYAN   "\033[36m"
+#define COLOR_WHITE  "\033[97m"
 #define COLOR_BOLD   "\033[1m"
 #define COLOR_DIM    "\033[90m"
 #define COLOR_RESET  "\033[0m"
