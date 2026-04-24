@@ -30,6 +30,7 @@ SRCS := $(SRCDIR)/main.c       \
         $(SRCDIR)/json_util.c  \
         $(SRCDIR)/args_util.c  \
         $(SRCDIR)/set_plan.c   \
+        $(SRCDIR)/completion_util.c \
         $(SRCDIR)/log.c
 
 # ----- CONFD_LIB: đường dẫn đến libconfd.so -----
@@ -123,7 +124,8 @@ TEST_BINS := \
     $(TESTBIN)/test_formatter \
     $(TESTBIN)/test_text_to_xml \
     $(TESTBIN)/test_keypath \
-    $(TESTBIN)/test_set_plan
+    $(TESTBIN)/test_set_plan \
+    $(TESTBIN)/test_completion
 
 $(TESTBIN):
 	mkdir -p $(TESTBIN)
@@ -150,6 +152,11 @@ $(TESTBIN)/test_keypath: $(TESTDIR)/test_keypath.c \
 # test_set_plan: set_plan.c + schema.c
 $(TESTBIN)/test_set_plan: $(TESTDIR)/test_set_plan.c \
                            $(SRCDIR)/set_plan.c $(SRCDIR)/schema.c | $(TESTBIN)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(TEST_LDFLAGS)
+
+# test_completion: completion_util.c + schema.c
+$(TESTBIN)/test_completion: $(TESTDIR)/test_completion.c \
+                             $(SRCDIR)/completion_util.c $(SRCDIR)/schema.c | $(TESTBIN)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(TEST_LDFLAGS)
 
 test: $(TEST_BINS)
@@ -181,7 +188,7 @@ coverage:
 	    TEST_LDFLAGS="$(XML2_LDFLAGS) $(COV_FLAGS)"
 	@echo ""
 	@echo "─── gcov report ──────────────────────────────────"
-	@cd $(TESTBIN) && for src in json_util args_util set_plan formatter schema; do \
+	@cd $(TESTBIN) && for src in json_util args_util set_plan completion_util formatter schema; do \
 	    gcno=$$(ls *-$$src.gcno 2>/dev/null | head -1); \
 	    [ -z "$$gcno" ] && continue; \
 	    base=$${gcno%.gcno}; \

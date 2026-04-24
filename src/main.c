@@ -59,6 +59,7 @@
 #include "maapi-direct.h"
 #include "json_util.h"
 #include "set_plan.h"
+#include "completion_util.h"
 
 /* ─── Forward declarations ─────────────────────────────────── */
 static int select_and_connect_ne(void);
@@ -332,70 +333,32 @@ static char *cmd_generator(const char *text, int state) {
 /* Node cha dùng cho completion hiện tại */
 static schema_node_t *g_comp_parent = NULL;
 
+/*
+ * rl_line_up_to_cursor — Trả về copy của rl_line_buffer cắt tại rl_point
+ * (vị trí cursor). Dùng cho tab-completion mid-line: chỉ xét ngữ cảnh
+ * bên TRÁI cursor, bỏ qua phần bên phải để gợi ý đúng theo vị trí.
+ *
+ * Caller phải free. Trả về NULL nếu rl_line_buffer NULL / oom.
+ */
+static char *rl_line_up_to_cursor(void) {
+    if (!rl_line_buffer) return NULL;
+    int len  = (int)strlen(rl_line_buffer);
+    int stop = (rl_point >= 0 && rl_point <= len) ? rl_point : len;
+    char *s = malloc((size_t)stop + 1);
+    if (!s) return NULL;
+    memcpy(s, rl_line_buffer, (size_t)stop);
+    s[stop] = '\0';
+    return s;
+}
+
 /**
- * find_completion_parent - Tìm node cha trong cây schema dựa trên đường dẫn
- * mà người dùng đã gõ trên dòng lệnh.
+ * find_completion_parent - Wrapper gọi pure helper từ completion_util.c
+ * với rl_line_buffer + rl_point hiện tại của readline.
  *
- * Hàm phân tích nội dung dòng lệnh readline, tách thành các token,
- * bỏ qua tên lệnh (show/set/unset) và lệnh con (running-config/candidate-config),
- * rồi duyệt cây schema theo các token còn lại để xác định node cha hiện tại.
- *
- * @return  Con trỏ tới node schema cha, hoặc NULL nếu không tìm được
+ * Logic thực sự ở completion_parent_for() (testable, no readline deps).
  */
 static schema_node_t *find_completion_parent(void) {
-    if (!g_schema) return NULL;
-
-    /* Lấy toàn bộ nội dung dòng lệnh tính đến vị trí con trỏ */
-    const char *line = rl_line_buffer;
-    if (!line) return g_schema;
-
-    /* Tách dòng lệnh thành mảng token */
-    int count = 0;
-    char **tokens = str_split(line, &count);
-    if (!tokens || count == 0) {
-        free_tokens(tokens, count);
-        return g_schema;
-    }
-
-    /* Bỏ qua token đầu tiên (tên lệnh: show, set, unset) */
-    int start_idx = 1;
-    /* Nếu lệnh là "show", bỏ qua thêm token thứ 2 (running-config/candidate-config) */
-    if (count > 1 && (strcasecmp(tokens[0], "show") == 0)) {
-        start_idx = 2;
-    }
-
-    /* Duyệt cây schema theo các token đường dẫn, bỏ qua token cuối nếu đang gõ dở */
-    schema_node_t *node = g_schema;
-    int end_idx = count;
-    /* Nếu dòng lệnh không kết thúc bằng dấu cách, token cuối là từ đang gõ dở (partial) */
-    int line_len = strlen(line);
-    if (line_len > 0 && line[line_len - 1] != ' ') {
-        end_idx = count - 1;
-    }
-
-    for (int i = start_idx; i < end_idx && node; i++) {
-        /* Tìm node con có tên khớp với token hiện tại */
-        schema_node_t *found = NULL;
-        for (schema_node_t *c = node->children; c; c = c->next) {
-            if (strcasecmp(c->name, tokens[i]) == 0) {
-                found = c;
-                break;
-            }
-        }
-        if (found) {
-            node = found;
-            /* Nếu node là list (danh sách YANG), token tiếp theo là giá trị key -> bỏ qua */
-            if (found->is_list && i + 1 < end_idx) {
-                i++; /* Nhảy qua giá trị key của list */
-            }
-        } else {
-            /* Token không khớp node con nào — có thể là giá trị key, dừng duyệt */
-            break;
-        }
-    }
-
-    free_tokens(tokens, count);
-    return node;
+    return completion_parent_for(g_schema, rl_line_buffer, rl_point);
 }
 
 /*
@@ -715,21 +678,28 @@ static char **maapi_completer(const char *text, int start, int end) {
     /* Ngăn readline dùng completion mặc định (tên file) khi không có gợi ý */
     rl_attempted_completion_over = 1;
 
-    /* Từ đầu tiên trên dòng lệnh: gợi ý tên lệnh */
+    /* Từ đầu tiên trên dòng lệnh: gợi ý tên lệnh.
+     * Cũng bao gồm trường hợp cursor ở giữa dòng nhưng toàn bộ bên TRÁI
+     * cursor là whitespace (user xoá "set " rồi đặt cursor ở đầu). */
     if (start == 0)
         return rl_completion_matches(text, cmd_generator);
 
-    /* Phân tích các token trên dòng lệnh để xác định ngữ cảnh */
+    /* Phân tích các token BÊN TRÁI cursor để xác định ngữ cảnh — cho phép
+     * hoàn thiện ở giữa dòng, không bị ảnh hưởng bởi phần sau cursor. */
+    char *line = rl_line_up_to_cursor();
+    if (!line) return NULL;
     int count = 0;
-    char **tokens = str_split(rl_line_buffer, &count);
+    char **tokens = str_split(line, &count);
     if (!tokens || count == 0) {
         free_tokens(tokens, count);
+        free(line);
         return NULL;
     }
     const char *cmd = tokens[0];
-    /* Kiểm tra xem con trỏ có đang sau dấu cách cuối (trailing space) hay không */
-    int line_len = (int)strlen(rl_line_buffer);
-    int trailing = (line_len > 0 && rl_line_buffer[line_len - 1] == ' ');
+    /* Kiểm tra xem cursor có đang sau dấu cách cuối (trailing space) hay không.
+     * Dùng độ dài phần BÊN TRÁI cursor, không phải strlen toàn dòng. */
+    int line_len = (int)strlen(line);
+    int trailing = (line_len > 0 && line[line_len - 1] == ' ');
     int word_count = trailing ? count + 1 : count; /* Vị trí từ logic (đang gõ từ thứ mấy) */
 
     char **result = NULL;
@@ -822,6 +792,7 @@ static char **maapi_completer(const char *text, int start, int end) {
     }
 
     free_tokens(tokens, count);
+    free(line);
     return result;
 }
 
